@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "board_spi.c"
+        "sdcard.c"
+        "softspi.c"
+        "lcd.c"
+        "touch.c"
+        "ui.c"
+        "jobs.c"
+        "wifi.c"
+        "web_server.c"
+        "spiex.c"
+        "xbox.c"
+        "nand_ecc.c"
+        "xenon_keys.c"
+        "build_image.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_driver_spi
+        esp_driver_sdspi
+        esp_wifi
+        esp_http_server
+        nvs_flash
+        fatfs
+        sdmmc
+        esp_timer
+)

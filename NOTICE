@@ -1,0 +1,31 @@
+TrinityWeb360 — ESP32-S3 Xbox 360 (Trinity) web NAND flasher + RGH image builder
+Copyright (C) 2026 xxxtrippy
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the Free
+Software Foundation. See LICENSE.
+
+----------------------------------------------------------------------
+Derived work / attribution
+----------------------------------------------------------------------
+
+The Southbridge SPI register protocol and the NAND/eMMC command sequences in
+src/spiex.c and src/xbox.c are ported from:
+
+  * GxOSS/espflasher            (GPL-3.0)
+      - balika011    — original PicoFlasher, on which espflasher is based
+      - 15432        — eMMC-over-SPI support
+      - Hax360       — project overhaul
+      - ExposureMG   — ESP32 port
+
+  * balika011/PicoFlasher       — the canonical RP2040 flasher
+
+The image-build pipeline (src/build_image.c, src/nand_ecc.c, src/xenon_keys.c)
+reimplements, for on-device use, the flashing/build workflow that J-Runner
+drives through the open-source xeBuild toolchain. The xeBuild *data package*
+(patched bootloaders, patch sets, SMC, dashboard files) is NOT included and is
+Microsoft-derived; users supply their own copy (the same one J-Runner uses) on
+an SD card.
+
+This tool is for working on a console you own. It installs no Microsoft code it
+is not given by the user.
