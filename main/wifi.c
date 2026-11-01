@@ -30,8 +30,8 @@
 #include "esp_netif.h"
 
 /* ======================= EDIT THESE FOR YOUR NETWORK ======================= */
-#define STA_SSID "Nacho.Wifi"
-#define STA_PASS "Dakodaxj87"
+#define STA_SSID "NETWORK"
+#define STA_PASS "PASSWORD"
 /* ========================================================================== */
 
 /*
