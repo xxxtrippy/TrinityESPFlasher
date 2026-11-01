@@ -8,7 +8,9 @@
  *   status line (current stage / result)
  *   console info line (flash config)
  *   progress bar
- *   4 buttons: Detect | Dump | Build | Flash
+ *   percent label
+ *   hint line
+ *   4 buttons: Find | Dump | Build | Flash
  *
  * No WiFi, no web, no PC: the screen is the whole interface. The CPU key for
  * Build is read from /sd/cpukey.txt.
@@ -27,7 +29,7 @@
 #include "sdcard.h"
 
 #define BG       C_BLACK
-#define TITLE_BG C_PURPLE
+#define TITLE_BG C_MAROON
 #define BTN_BG   C_DGRAY
 #define BTN_HI   C_BLUE
 
@@ -35,11 +37,20 @@ typedef struct { int x, y, w, h; const char *label; job_t job; } btn_t;
 
 /* bottom row of 4 buttons */
 static btn_t s_btns[4] = {
-    { 4,   188, 74, 46, "Detect", JOB_NONE  },
-    { 84,  188, 74, 46, "Dump",   JOB_DUMP  },
-    { 164, 188, 74, 46, "Build",  JOB_BUILD },
-    { 244, 188, 72, 46, "Flash",  JOB_FLASH },
+    { 4,   188, 74, 46, "FND", JOB_NONE  },
+    { 84,  188, 74, 46, "DMP",   JOB_DUMP  },
+    { 164, 188, 74, 46, "BLD",  JOB_BUILD },
+    { 244, 188, 72, 46, "FLSH",  JOB_FLASH },
 };
+
+/* scale 1 = 8px/char, scale 2 = 16px/char */
+static void text_center(int y, const char *s, uint16_t fg, uint16_t bg, int scale)
+{
+    int tw = (int)strlen(s) * 8 * scale;
+    int x = (LCD_W - tw) / 2;
+    if (x < 0) x = 0;               /* too long: pin to left edge */
+    lcd_text(x, y, s, fg, bg, scale);
+}
 
 static void draw_button(const btn_t *b, bool pressed)
 {
@@ -56,18 +67,19 @@ static void draw_static(void)
 {
     lcd_fill(BG);
     lcd_fill_rect(0, 0, LCD_W, 28, TITLE_BG);
-    lcd_text(8, 6, "Trinity Flasher", C_WHITE, TITLE_BG, 2);
+    text_center(6, "Trinity Flasher", C_WHITE, TITLE_BG, 2);
     for (int i = 0; i < 4; i++) draw_button(&s_btns[i], false);
 }
 
 static void draw_status(const job_status_t *s)
 {
-    /* status line */
-    lcd_fill_rect(0, 34, LCD_W, 20, BG);
     uint16_t col = s->done ? (s->ok ? C_GREEN : C_RED) : C_AMBER;
-    lcd_text(8, 36, s->stage, col, BG, 2);
 
-    /* console info */
+    /* status line (centered) */
+    lcd_fill_rect(0, 34, LCD_W, 20, BG);
+    text_center(36, s->stage, col, BG, 2);
+
+    /* console info (centered) */
     lcd_fill_rect(0, 62, LCD_W, 18, BG);
     char line[48];
     if (s->linked) {
@@ -76,7 +88,7 @@ static void draw_status(const job_status_t *s)
     } else {
         strcpy(line, "console: not detected");
     }
-    lcd_text(8, 62, line, C_GRAY, BG, 1);
+    text_center(62, line, C_GRAY, BG, 1);
 
     /* progress bar */
     int bx = 8, by = 92, bw = LCD_W - 16, bh = 26;
@@ -84,15 +96,18 @@ static void draw_status(const job_status_t *s)
     int fillw = (bw - 4) * s->percent / 100;
     lcd_fill_rect(bx + 2, by + 2, bw - 4, bh - 4, BG);
     if (fillw > 0) lcd_fill_rect(bx + 2, by + 2, fillw, bh - 4, col);
+
+    /* percent label, below the bar, centered, solid background */
     char pc[8];
     snprintf(pc, sizeof(pc), "%d%%", s->percent);
-    lcd_text(bx + bw / 2 - 12, by + 6, pc, C_WHITE, (fillw > bw/2 ? col : BG), 1);
+    lcd_fill_rect(0, 120, LCD_W, 10, BG);
+    text_center(121, pc, C_WHITE, BG, 1);
 
-    /* hint line */
-    lcd_fill_rect(0, 128, LCD_W, 16, BG);
-    const char *hint = s->flashable ? "image ready - tap Flash"
-                       : (s->have_dump ? "dump saved - tap Build" : "tap Detect, then Dump");
-    lcd_text(8, 128, hint, C_GRAY, BG, 1);
+    /* hint line (centered) */
+    lcd_fill_rect(0, 134, LCD_W, 16, BG);
+    const char *hint = s->flashable ? "img ready - tap FLSH"
+                       : (s->have_dump ? "DMP saved - tap BLD" : "tap FND, then DMP");
+    text_center(136, hint, C_GRAY, BG, 1);
 }
 
 static int hit_button(int x, int y)
@@ -113,16 +128,23 @@ static void ui_task(void *arg)
     draw_status(&st);
 
     int last_pct = -1;
-    bool last_done = false;
+    bool last_done = false, last_linked = false, last_dump = false;
+    char last_stage[32] = "";
     uint32_t touch_lockout = 0;
 
     for (;;) {
         /* refresh status when it changes */
         jobs_get(&st);
-        if (st.percent != last_pct || st.done != last_done) {
+        if (st.percent != last_pct || st.done != last_done ||
+            st.linked != last_linked || st.have_dump != last_dump ||
+            strncmp(st.stage, last_stage, sizeof(last_stage)) != 0) {
             draw_status(&st);
             last_pct = st.percent;
             last_done = st.done;
+            last_linked = st.linked;
+            last_dump = st.have_dump;
+            strncpy(last_stage, st.stage, sizeof(last_stage) - 1);
+            last_stage[sizeof(last_stage) - 1] = '\0';
         }
 
         /* handle touch (debounced) */
