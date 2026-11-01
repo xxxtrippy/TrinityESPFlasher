@@ -1,4 +1,4 @@
-# TrinityWeb360
+# TrinityESPFlasher
 
 A **fully standalone Xbox 360 Slim (Trinity) NAND flasher** on an ESP32-S3 with
 a 2.4" touch screen. **No PC, no phone, no WiFi** — dump the NAND, build the
