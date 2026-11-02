@@ -221,19 +221,14 @@ There is no authentication. Only run it on a network you trust.
 | **BLD** | Build: loads your CPU key from the SD card, checks the data package, and assembles the image. |
 | **FLSH** | Flash: writes a built image back. Reports `no verified image` and does nothing unless a build passed verification. |
 
-The title, stage line, console info line, percent label, and hint line are all
-centered. The stage line is **amber** while working, **green** when done, and
-**red** on a problem. The hint line under the progress bar tells you the next
-step (`tap FND, then DMP`, then `DMP saved - tap BLD`, then
-`img ready - tap FLSH`).
-
-The web UI offers the same flow, plus a box to type your CPU key instead of
-using `cpukey.txt`.
 
 <p align="center">
   <img src="docs/idle.png" alt="idle" width="240"> <img src="docs/dump.png" alt="dump" width="240">
   <img src="docs/dumpcomplete.png" alt="dumpcomplete" width="240"> <img src="docs/built.png" alt="built" width="240">
 </p>
+
+The web UI offers the same flow, plus a box to type your CPU key instead of
+using `cpukey.txt`.
 ---
 
 ## Project status
