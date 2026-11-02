@@ -67,4 +67,14 @@
 #define TOUCH_CS  8
 #define TOUCH_IRQ 9
 
+/*
+ * --- Two push buttons (replace the touch screen) ---
+ * Wire each button between its GPIO and GND. No resistor needed: the internal
+ * pull-up is enabled, so a press reads LOW.
+ *   RIGHT  : moves the highlight FND -> DMP -> BLD -> FLSH -> back to FND
+ *   SELECT : runs the highlighted action
+ */
+#define PIN_BTN_RIGHT  42
+#define PIN_BTN_SELECT 1
+
 #endif
