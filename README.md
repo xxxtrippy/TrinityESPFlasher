@@ -231,8 +231,8 @@ The web UI offers the same flow, plus a box to type your CPU key instead of
 using `cpukey.txt`.
 
 <p align="center">
-  <img src="docs/idle.png" alt="idle" width="320"> <img src="docs/dump.png" alt="dump" width="320">
-  <img src="docs/dumpcomplete.png" alt="dumpcomplete" width="320"> <img src="docs/built.png" alt="built" width="320">
+  <img src="docs/idle.png" alt="idle" width="240"> <img src="docs/dump.png" alt="dump" width="240">
+  <img src="docs/dumpcomplete.png" alt="dumpcomplete" width="240"> <img src="docs/built.png" alt="built" width="240">
 </p>
 ---
 
