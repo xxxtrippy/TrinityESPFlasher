@@ -74,7 +74,7 @@
  *   RIGHT  : moves the highlight FND -> DMP -> BLD -> FLSH -> back to FND
  *   SELECT : runs the highlighted action
  */
-#define PIN_BTN_RIGHT  42
-#define PIN_BTN_SELECT 1
+#define PIN_BTN_RIGHT  47
+#define PIN_BTN_SELECT 48
 
 #endif
