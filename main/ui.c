@@ -1,5 +1,5 @@
 /*
- * ui.c — standalone on-screen touch UI for TrinityWeb360.
+ * ui.c — standalone on-screen UI for TrinityWeb360, driven by two buttons.
  *
  * GPL-3.0. See LICENSE.
  *
@@ -7,13 +7,14 @@
  *   title bar
  *   status line (current stage / result)
  *   console info line (flash config)
- *   progress bar
- *   percent label
- *   hint line
- *   4 buttons: Find | Dump | Build | Flash
+ *   progress bar + percent
+ *   hint line (next step)
+ *   description of the highlighted button
+ *   4 buttons: FND | DMP | BLD | FLSH   (one is highlighted)
  *
- * No WiFi, no web, no PC: the screen is the whole interface. The CPU key for
- * Build is read from /sd/cpukey.txt.
+ * Controls (see pins.h): RIGHT cycles the highlight and wraps from FLSH back
+ * to FND; SELECT runs the highlighted action. No touch screen, WiFi, or PC is
+ * needed. The CPU key for Build is read from /sd/cpukey.txt.
  */
 #include "ui.h"
 
@@ -22,26 +23,43 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 
+#include "pins.h"
 #include "lcd.h"
-#include "touch.h"
 #include "jobs.h"
 #include "sdcard.h"
+
+/* lcd.h has no maroon; define it here if it isn't provided (RGB565). */
+#ifndef C_MAROON
+#define C_MAROON 0x8000
+#endif
 
 #define BG       C_BLACK
 #define TITLE_BG C_MAROON
 #define BTN_BG   C_DGRAY
 #define BTN_HI   C_BLUE
 
-typedef struct { int x, y, w, h; const char *label; job_t job; } btn_t;
+#define N_BTNS 4
+
+typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED } btn_state_t;
+
+typedef struct {
+    int x, y, w, h;
+    const char *label;
+    const char *desc;
+    job_t job;
+} btn_t;
 
 /* bottom row of 4 buttons */
-static btn_t s_btns[4] = {
-    { 4,   188, 74, 46, "FND", JOB_NONE  },
-    { 84,  188, 74, 46, "DMP",   JOB_DUMP  },
-    { 164, 188, 74, 46, "BLD",  JOB_BUILD },
-    { 244, 188, 72, 46, "FLSH",  JOB_FLASH },
+static const btn_t s_btns[N_BTNS] = {
+    { 4,   188, 74, 46, "FND",  "FND: find console",          JOB_NONE  },
+    { 84,  188, 74, 46, "DMP",  "DMP: dump NAND (3 reads)",   JOB_DUMP  },
+    { 164, 188, 74, 46, "BLD",  "BLD: build image",           JOB_BUILD },
+    { 244, 188, 72, 46, "FLSH", "FLSH: flash + verify",       JOB_FLASH },
 };
+
+static int s_sel = 0; /* highlighted button */
 
 /* scale 1 = 8px/char, scale 2 = 16px/char */
 static void text_center(int y, const char *s, uint16_t fg, uint16_t bg, int scale)
@@ -52,15 +70,33 @@ static void text_center(int y, const char *s, uint16_t fg, uint16_t bg, int scal
     lcd_text(x, y, s, fg, bg, scale);
 }
 
-static void draw_button(const btn_t *b, bool pressed)
+static void draw_button(const btn_t *b, btn_state_t state)
 {
-    uint16_t fill = pressed ? BTN_HI : BTN_BG;
+    uint16_t fill = (state == BS_PRESSED)  ? C_GREEN
+                  : (state == BS_SELECTED) ? BTN_HI
+                  :                          BTN_BG;
     lcd_fill_rect(b->x, b->y, b->w, b->h, fill);
-    lcd_rect(b->x, b->y, b->w, b->h, C_GRAY);
+    lcd_rect(b->x, b->y, b->w, b->h, state == BS_NORMAL ? C_GRAY : C_WHITE);
+    if (state != BS_NORMAL) {       /* double border = highlighted */
+        lcd_rect(b->x + 1, b->y + 1, b->w - 2, b->h - 2, C_WHITE);
+    }
     int tw = (int)strlen(b->label) * 16; /* scale 2 -> 16px/char */
     int tx = b->x + (b->w - tw) / 2;
     int ty = b->y + (b->h - 16) / 2;
     lcd_text(tx, ty, b->label, C_WHITE, fill, 2);
+}
+
+static void draw_desc(void)
+{
+    lcd_fill_rect(0, 160, LCD_W, 12, BG);
+    text_center(162, s_btns[s_sel].desc, C_WHITE, BG, 1);
+}
+
+static void draw_all_buttons(void)
+{
+    for (int i = 0; i < N_BTNS; i++) {
+        draw_button(&s_btns[i], i == s_sel ? BS_SELECTED : BS_NORMAL);
+    }
 }
 
 static void draw_static(void)
@@ -68,7 +104,8 @@ static void draw_static(void)
     lcd_fill(BG);
     lcd_fill_rect(0, 0, LCD_W, 28, TITLE_BG);
     text_center(6, "Trinity Flasher", C_WHITE, TITLE_BG, 2);
-    for (int i = 0; i < 4; i++) draw_button(&s_btns[i], false);
+    draw_all_buttons();
+    draw_desc();
 }
 
 static void draw_status(const job_status_t *s)
@@ -105,24 +142,75 @@ static void draw_status(const job_status_t *s)
 
     /* hint line (centered) */
     lcd_fill_rect(0, 134, LCD_W, 16, BG);
-    const char *hint = s->flashable ? "img ready - tap FLSH"
-                       : (s->have_dump ? "DMP saved - tap BLD" : "tap FND, then DMP");
+    const char *hint = s->flashable ? "img ready - select FLSH"
+                       : (s->have_dump ? "DMP saved - select BLD" : "select FND, then DMP");
     text_center(136, hint, C_GRAY, BG, 1);
 }
 
-static int hit_button(int x, int y)
+/* ---- push buttons (active low, internal pull-up) ---- */
+
+typedef struct { int pin; int prev; } pushbtn_t;
+
+static pushbtn_t s_right  = { PIN_BTN_RIGHT,  1 };
+static pushbtn_t s_select = { PIN_BTN_SELECT, 1 };
+
+static void buttons_init(void)
 {
-    for (int i = 0; i < 4; i++) {
-        btn_t *b = &s_btns[i];
-        if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h)
-            return i;
+    gpio_config_t in = {
+        .pin_bit_mask = (1ULL << PIN_BTN_RIGHT) | (1ULL << PIN_BTN_SELECT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&in);
+}
+
+/* True once per press (falling edge, debounced). Holding does not repeat. */
+static bool pushed(pushbtn_t *b)
+{
+    int lvl = gpio_get_level(b->pin);
+    bool ev = false;
+    if (lvl == 0 && b->prev == 1) {
+        vTaskDelay(pdMS_TO_TICKS(15));          /* debounce */
+        ev = (gpio_get_level(b->pin) == 0);
     }
-    return -1;
+    b->prev = lvl;
+    return ev;
+}
+
+static void move_right(void)
+{
+    int old = s_sel;
+    s_sel = (s_sel + 1) % N_BTNS;               /* FLSH wraps back to FND */
+    draw_button(&s_btns[old], BS_NORMAL);
+    draw_button(&s_btns[s_sel], BS_SELECTED);
+    draw_desc();
+}
+
+static void run_selected(void)
+{
+    const btn_t *b = &s_btns[s_sel];
+
+    draw_button(b, BS_PRESSED);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    draw_button(b, BS_SELECTED);
+
+    if (b->job == JOB_NONE) {
+        jobs_detect();
+    } else {
+        if (b->job == JOB_BUILD) {
+            jobs_load_cpukey_from_sd(); /* best-effort */
+        }
+        jobs_start(b->job);
+    }
 }
 
 static void ui_task(void *arg)
 {
+    buttons_init();
     draw_static();
+
     job_status_t st;
     jobs_get(&st);
     draw_status(&st);
@@ -130,47 +218,38 @@ static void ui_task(void *arg)
     int last_pct = -1;
     bool last_done = false, last_linked = false, last_dump = false;
     char last_stage[32] = "";
-    uint32_t touch_lockout = 0;
+    uint32_t tick = 0;
 
     for (;;) {
-        /* refresh status when it changes */
-        jobs_get(&st);
-        if (st.percent != last_pct || st.done != last_done ||
-            st.linked != last_linked || st.have_dump != last_dump ||
-            strncmp(st.stage, last_stage, sizeof(last_stage)) != 0) {
-            draw_status(&st);
-            last_pct = st.percent;
-            last_done = st.done;
-            last_linked = st.linked;
-            last_dump = st.have_dump;
-            strncpy(last_stage, st.stage, sizeof(last_stage) - 1);
-            last_stage[sizeof(last_stage) - 1] = '\0';
-        }
-
-        /* handle touch (debounced) */
-        int tx, ty;
-        if (touch_lockout == 0 && touch_get(&tx, &ty)) {
-            int b = hit_button(tx, ty);
-            if (b >= 0) {
-                draw_button(&s_btns[b], true);
-                vTaskDelay(pdMS_TO_TICKS(120));
-                draw_button(&s_btns[b], false);
-
-                if (s_btns[b].job == JOB_NONE) {
-                    jobs_detect();
-                } else {
-                    if (s_btns[b].job == JOB_BUILD) {
-                        jobs_load_cpukey_from_sd(); /* best-effort */
-                    }
-                    jobs_start(s_btns[b].job);
-                }
-                touch_lockout = 6; /* ~600ms */
-                last_pct = -1;     /* force redraw */
+        /* refresh status when it changes (every ~100 ms) */
+        if ((tick++ % 5) == 0) {
+            jobs_get(&st);
+            if (st.percent != last_pct || st.done != last_done ||
+                st.linked != last_linked || st.have_dump != last_dump ||
+                strncmp(st.stage, last_stage, sizeof(last_stage)) != 0) {
+                draw_status(&st);
+                last_pct = st.percent;
+                last_done = st.done;
+                last_linked = st.linked;
+                last_dump = st.have_dump;
+                strncpy(last_stage, st.stage, sizeof(last_stage) - 1);
+                last_stage[sizeof(last_stage) - 1] = '\0';
             }
         }
-        if (touch_lockout) touch_lockout--;
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (pushed(&s_right)) {
+            move_right();
+        }
+
+        if (pushed(&s_select)) {
+            jobs_get(&st);
+            if (!st.busy) {             /* ignore SELECT while a job runs */
+                run_selected();
+                last_pct = -1;          /* force status redraw */
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
