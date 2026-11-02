@@ -230,6 +230,10 @@ step (`tap FND, then DMP`, then `DMP saved - tap BLD`, then
 The web UI offers the same flow, plus a box to type your CPU key instead of
 using `cpukey.txt`.
 
+<p align="center">
+  <img src="docs/idle" alt="idle" width="320"> <img src="docs/dump" alt="dump" width="320">
+  <img src="docs/dumpcomplete" alt="dumpcomplete" width="320"> <img src="docs/built" alt="built" width="320">
+</p>
 ---
 
 ## Project status
