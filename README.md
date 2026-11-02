@@ -2,11 +2,7 @@
   <img src="docs/Logo.jpg" alt="TrinityESPFlasher" width="500">
 </p>
 
-<img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-N16R8-E7352C?logo=espressif&logoColor=white">
-<img alt="ESP-IDF" src="https://img.shields.io/badge/ESP--IDF-v5.5.x-blue">
-<img alt="Target" src="https://img.shields.io/badge/Xbox%20360-Trinity-107C10">
-<img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-lightgrey">
-<img alt="Status" src="https://img.shields.io/badge/status-work%20in%20progress-orange">
+<img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-N16R8-E7352C?logo=espressif&logoColor=white"><img alt="ESP-IDF" src="https://img.shields.io/badge/ESP--IDF-v5.5.x-blue"><img alt="Target" src="https://img.shields.io/badge/Xbox%20360-Trinity-107C10"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-lightgrey"><img alt="Status" src="https://img.shields.io/badge/status-work%20in%20progress-orange">
 
 
 
