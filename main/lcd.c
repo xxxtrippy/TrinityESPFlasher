@@ -71,7 +71,7 @@ bool lcd_init(void)
 
     wr_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(120));
     wr_cmd(0x3A); wr_d8(0x55);
-    wr_cmd(0x36); wr_d8(0x28);
+    wr_cmd(0x36); wr_d8(0xE8); /* landscape, rotated 180 deg (was 0x28) */
     wr_cmd(0xB1); { uint8_t d[] = {0x00,0x18}; wr_dn(d,2); }
     wr_cmd(0xC0); wr_d8(0x23);
     wr_cmd(0xC1); wr_d8(0x10);
