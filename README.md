@@ -1,3 +1,8 @@
+ <p align="center">
+  <img src="docs/Logo.jpg" alt="TrinityESPFlasher" width="500">
+</p>
+
+
 # TrinityESPFlasher (+ TrinityWeb360)
 
 An **Xbox 360 Slim (Trinity) NAND flasher** that runs entirely on an
