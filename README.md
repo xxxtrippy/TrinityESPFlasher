@@ -67,13 +67,13 @@ These are the same points the RP2040 PicoFlasher uses.
 
 | ESP32-S3 GPIO | J2C1 signal | Notes |
 |---|---|---|
-| GPIO13 | SPI_MISO | SB to ESP data |
-| GPIO11 | SPI_MOSI | ESP to SB data |
-| GPIO12 | SPI_CLK | clock |
 | GPIO10 | SPI_SS_N | chip select |
-| GPIO14 | SMC_DBG_EN | SMC debug enable |
-| GPIO21 | SMC_RST_XDK_N | SMC reset |
+| GPIO12 | SPI_CLK | clock |
+| GPIO13 | SPI_MISO | SB to ESP data |
 | GND | GND | **required** |
+| GPIO21 | SMC_RST_XDK_N | SMC reset |
+| GPIO14 | SMC_DBG_EN | SMC debug enable |
+| GPIO11 | SPI_MOSI | ESP to SB data |
 
 ### microSD card (SPI3)
 
