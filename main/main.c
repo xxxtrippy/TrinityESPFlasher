@@ -1,3 +1,4 @@
+
 /*
  * main.c — TrinityWeb360 entry point (standalone touch-screen build).
  *
@@ -18,6 +19,7 @@
 #include "jobs.h"
 #include "ui.h"
 #include "wifi.h"
+#include "rgb.h"
 
 static const char *TAG = "main";
 
@@ -25,6 +27,9 @@ void web_server_start(void);
 
 void app_main(void)
 {
+    /* Initialize onboard RGB LED first. */
+    rgb_init();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

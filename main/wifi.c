@@ -30,8 +30,8 @@
 #include "esp_netif.h"
 
 /* ======================= EDIT THESE FOR YOUR NETWORK ======================= */
-#define STA_SSID "NETWORK"
-#define STA_PASS "PASSWORD"
+#define STA_SSID "YOUR NETWORK"
+#define STA_PASS "YOUR PASSWORD"
 /* ========================================================================== */
 
 /*

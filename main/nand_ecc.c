@@ -1,22 +1,16 @@
 /*
- * nand_ecc.c — Xbox 360 NAND spare-area ECC generation and raw<->logical.
+ * nand_ecc.c — Xbox 360 NAND spare-area ECC and raw<->logical conversion.
  *
  * GPL-3.0. See LICENSE.
  *
- * The ECC algorithm is the 360 bootloader spare calculation (as implemented in
- * nandpro / 360 Flash Dump Tool / xeBuild): a linear feedback over the data
- * bytes producing the ECC bytes at the end of the 0x10 spare.
+ * The ECC is a 26-bit linear feedback over the first 0x1066 bits of the
+ * 0x210-byte page (data, the 12 metadata bytes, and the first 6 bits of the
+ * ECC word, which is treated as zero), polynomial 0x6954559. The result is
+ * inverted and shifted left by 6, then stored little endian at page offset
+ * 0x20C.
  *
- * ============================ VERIFICATION GATE ============================
- * The feedback polynomial (0x6954559) and the exact spare bit-packing below
- * are reconstructed and MUST be verified against a known-good reference before
- * any image this produces is written to a console. The correct reference is
- * the calcecc routine in nandpro / the Free60 ecc implementation. A single
- * wrong ECC bit can brick a boot. Until verified on-bench, the WRITE path must
- * refuse to flash a logical->raw image produced here (enforced in build_image.c
- * via BUILD_ECC_VERIFIED). Reading/raw-to-logical is safe (it only strips
- * spare) and is NOT gated.
- * ==========================================================================
+ * Checked against J-Runner's Trinity images: every page of TRINITY.ecc,
+ * TRINITY_RGH3.ecc and TRINITY_CR4.ecc reproduces its stored ECC word.
  */
 #include "nand_ecc.h"
 
@@ -24,57 +18,58 @@
 
 #include "nand_geom.h"
 
-/*
- * Calculate the 360 ECC for a 0x200-byte page plus the leading spare
- * bookkeeping. Reference algorithm (matches nandpro's calcecc):
- *   - 'val' accumulates over 0x1066 bits (0x200 data + spare bookkeeping) …
- * We implement the canonical byte-oriented form used by the community tools.
- */
+#define ECC_OFFSET 0x20Cu
+
+static uint32_t rd32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+uint32_t nand_ecc_calc(const uint8_t page[0x210])
+{
+    uint32_t val = 0, v = 0;
+
+    for (uint32_t i = 0; i < 0x1066; i++) {
+        if (!(i & 31)) {
+            uint32_t off = (i >> 5) * 4;
+            /* the ECC word itself counts as zero */
+            v = ~((off < ECC_OFFSET) ? rd32le(page + off) : 0u);
+        }
+        val ^= v & 1;
+        v >>= 1;
+        if (val & 1) val ^= 0x6954559u;
+        val >>= 1;
+    }
+    val = ~val;
+    return val << 6;
+}
+
+void nand_ecc_fix_page(uint8_t page[0x210])
+{
+    uint32_t e = nand_ecc_calc(page);
+    page[ECC_OFFSET + 0] = (uint8_t)(e);
+    page[ECC_OFFSET + 1] = (uint8_t)(e >> 8);
+    page[ECC_OFFSET + 2] = (uint8_t)(e >> 16);
+    page[ECC_OFFSET + 3] = (uint8_t)(e >> 24);
+}
+
 void nand_ecc_make_spare(const uint8_t data[0x200], uint32_t page_no,
                          uint8_t spare_out[0x10])
 {
-    uint8_t sp[0x10];
-    memset(sp, 0xFF, sizeof(sp));
+    uint8_t page[NAND_PAGE_RAW];
+    uint32_t block = page_no / 32u;             /* 32 pages per 0x4000 block */
 
-    /* Block/page bookkeeping in the spare (small-block retail layout):
-     *   sp[0] = 0x00 (fs sequence, unused for raw image build)
-     *   sp[1..2] = block id low/high relationship is layout-specific; for a
-     *   flat rebuild we set the address bytes the SB expects. */
-    uint32_t block = page_no; /* for small-block, 1 page == 1 addressable unit */
-    sp[0] = 0x00;
-    sp[1] = (uint8_t)((block >> 16) & 0xFF);
-    sp[2] = (uint8_t)((block >> 8) & 0xFF);
-    sp[3] = (uint8_t)(block & 0xFF);
-    sp[4] = 0x00;
-    sp[5] = 0x00;
-    sp[6] = 0x00;
-    sp[7] = 0x00;
-
-    /*
-     * ECC bytes sp[0x8..0xB].
-     *
-     * PLACEHOLDER — NOT the real 360 ECC. The genuine algorithm is the
-     * calcecc linear-feedback used by nandpro / Free60; porting it correctly
-     * (and proving it byte-for-byte against a reference) is the work the
-     * BUILD_ECC_VERIFIED gate guards. We intentionally do NOT ship a
-     * plausible-but-unverified polynomial here, because a wrong ECC that
-     * "looks computed" is more dangerous than an obvious stub: someone might
-     * trust it. We fill 0xFF so the output is structurally shaped like a spare
-     * but is self-evidently not a real ECC, and the write path stays gated.
-     *
-     * To implement for real: replace this block with the verified calcecc,
-     * then set BUILD_ECC_VERIFIED=1 in build_image.c only after a parity test.
-     */
-    sp[0x8] = 0xFF;
-    sp[0x9] = 0xFF;
-    sp[0xA] = 0xFF;
-    sp[0xB] = 0xFF;
-    sp[0xC] = 0xFF;
-    sp[0xD] = 0xFF;
-    sp[0xE] = 0xFF;
-    sp[0xF] = 0xFF;
-
-    memcpy(spare_out, sp, 0x10);
+    memcpy(page, data, NAND_PAGE_DATA);
+    memset(page + NAND_PAGE_DATA, 0, NAND_PAGE_SPARE);
+    /* Bootloader-area metadata: block number at byte 1, good-block marker 0xFF
+     * at byte 5. Verified against J-Runner's Trinity images for blocks 0..79;
+     * byte 2 (high part of the block number) is an assumption beyond 0xFF. */
+    page[NAND_PAGE_DATA + 1] = (uint8_t)(block);
+    page[NAND_PAGE_DATA + 2] = (uint8_t)(block >> 8);
+    page[NAND_PAGE_DATA + 5] = 0xFF;
+    nand_ecc_fix_page(page);
+    memcpy(spare_out, page + NAND_PAGE_DATA, NAND_PAGE_SPARE);
 }
 
 int nand_raw_to_logical(const uint8_t *raw, uint32_t pages, uint8_t *logical_out)

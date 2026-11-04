@@ -11,7 +11,8 @@
  * spare/ECC data. A raw dump is therefore 0x210 bytes per page.
  *
  *   Trinity 16MB:  16MB of DATA = 0x1000000 data bytes = 0x8000 pages of
- *   0x200 => with spare: 0x8000 * 0x210 = 0x10E0000 bytes = ~16.9 MiB raw dump.
+ *   0x200 => with spare: 0x8000 * 0x210 = 0x1080000 = 17,301,504 bytes
+ *   (about 16.5 MiB) raw dump.
  *
  * We keep both the data size and the raw-with-spare size explicit so the web
  * UI can label downloads correctly and the builder can sanity-check a dump.

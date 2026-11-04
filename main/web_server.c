@@ -11,9 +11,11 @@
  *   POST /api/build     start a build (JSON {cpu_key} optional; else cpukey.txt)
  *   POST /api/flash     start a flash
  *   GET  /api/progress  SSE live progress from jobs_get()
+ *   GET  /dump.bin      download the last verified dump (NANDDUMP.BIN)
  */
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,8 +44,10 @@ static esp_err_t h_index(httpd_req_t *r)
 
 static esp_err_t h_detect(httpd_req_t *r)
 {
-    jobs_detect();
     job_status_t s; jobs_get(&s);
+    if (s.busy) return resp_busy(r);   /* never touch the SMC mid-job */
+    jobs_detect();
+    jobs_get(&s);
     char buf[160];
     snprintf(buf, sizeof(buf),
         "{\"linked\":%s,\"flash_config\":\"0x%08lX\"}",
@@ -114,6 +118,39 @@ static esp_err_t h_progress(httpd_req_t *r)
     return httpd_resp_send_chunk(r, NULL, 0);
 }
 
+/* Stream the last verified dump from the SD card in 16 KB pieces. */
+static esp_err_t h_dump_bin(httpd_req_t *r)
+{
+    job_status_t s; jobs_get(&s);
+    if (s.busy) return resp_busy(r);   /* the card is being written */
+
+    FILE *f = fopen(SD_MOUNT_POINT "/NANDDUMP.BIN", "rb");
+    if (!f) {
+        httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "no verified dump on the SD card yet");
+        return ESP_OK;
+    }
+    const size_t CH = 16 * 1024;
+    char *buf = malloc(CH);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(r, "application/octet-stream");
+    httpd_resp_set_hdr(r, "Content-Disposition", "attachment; filename=\"nand_trinity.bin\"");
+
+    esp_err_t res = ESP_OK;
+    size_t n;
+    while ((n = fread(buf, 1, CH, f)) > 0) {
+        if (httpd_resp_send_chunk(r, buf, n) != ESP_OK) { res = ESP_FAIL; break; }
+    }
+    free(buf);
+    fclose(f);
+    if (res != ESP_OK) return res;           /* client went away */
+    return httpd_resp_send_chunk(r, NULL, 0);
+}
+
 static void reg(httpd_handle_t s, const char *uri, httpd_method_t m,
                 esp_err_t (*fn)(httpd_req_t *))
 {
@@ -127,6 +164,7 @@ void web_server_start(void)
     cfg.max_uri_handlers = 12;
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
+    cfg.send_wait_timeout = 15;   /* big download over WiFi */
 
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
@@ -140,5 +178,6 @@ void web_server_start(void)
     reg(srv, "/api/build",    HTTP_POST, h_build);
     reg(srv, "/api/flash",    HTTP_POST, h_flash);
     reg(srv, "/api/progress", HTTP_GET,  h_progress);
+    reg(srv, "/dump.bin",     HTTP_GET,  h_dump_bin);
     ESP_LOGI(TAG, "web UI up");
 }

@@ -15,6 +15,7 @@ idf_component_register(
         "nand_ecc.c"
         "xenon_keys.c"
         "build_image.c"
+        "rgb.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -27,4 +28,5 @@ idf_component_register(
         fatfs
         sdmmc
         esp_timer
+        led_strip
 )

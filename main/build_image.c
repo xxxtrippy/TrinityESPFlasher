@@ -3,28 +3,30 @@
  *
  * GPL-3.0. See LICENSE.
  *
+ * Streaming version: the dump and the output image are SD-card files that are
+ * processed in small chunks. Nothing the size of a full NAND image is ever
+ * allocated.
+ *
  * ======================= READ THIS BEFORE TRUSTING OUTPUT =======================
- * This pipeline assembles a glitch image on-chip from a console dump + the
- * xeBuild data package on SD. The data-plumbing stages (locate secrets, select
- * ingredients, lay out the image, regenerate ECC) are implemented. The
- * CRYPTOGRAPHIC stages that gate a bootable image — keyvault decrypt/verify,
- * bootloader (CB/CBB/CD/CE) re-encryption and hash chaining — are the parts
- * that require byte-for-byte parity with xeBuild and are NOT yet verified
- * against real hardware.
+ * The data-plumbing stages are implemented. The CRYPTOGRAPHIC stages that make
+ * a bootable image (keyvault decrypt/verify, bootloader re-encryption, hash
+ * chain) and the ECC regeneration are NOT implemented yet: the output is
+ * currently a copy of the dump.
  *
- * Two compile-time gates protect the user:
- *   BUILD_ECC_VERIFIED     — set only after nand_ecc.c matches a reference
- *   BUILD_CRYPTO_VERIFIED  — set only after the hash/crypto chain matches xeBuild
- *
- * Until BOTH are defined, build_rgh_image() runs end-to-end, fills out_image,
- * and returns BUILD_NOT_VERIFIED instead of BUILD_OK. The flash path refuses to
- * write anything that did not return BUILD_OK. This makes "it compiles" and
- * "it is safe to flash" two clearly separate things — by design.
+ * The only thing that can certify an image is PARITY: BUILD_OK is returned only
+ * if the built image is byte-identical to a known-good image you built in
+ * J-Runner from the SAME dump and CPU key, placed on the card as
+ * /sd/REFIMG.BIN (raw, with spare, same size as the dump). No reference, a
+ * reference that equals the retail dump, or any mismatch = BUILD_NOT_VERIFIED,
+ * and the flash path refuses the image.
  * ================================================================================
  */
 #include "build_image.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -34,21 +36,23 @@
 #include "xenon_keys.h"
 #include "sdcard.h"
 
-/* Flip these to 1 only after on-bench parity verification. Intentionally 0. */
-#define BUILD_ECC_VERIFIED    0
-#define BUILD_CRYPTO_VERIFIED 0
+#define REF_FILE SD_MOUNT_POINT "/REFIMG.BIN"
+
+/* First 0x8000 logical bytes hold the header + keyvault region. */
+#define HDR_PAGES   (0x8000u / NAND_PAGE_DATA)
+#define COPY_PAGES  32u
 
 static const char *TAG = "build";
 
 const char *build_status_str(build_status_t s)
 {
     switch (s) {
-        case BUILD_OK:            return "ok";
-        case BUILD_NEED_CPU_KEY:  return "cpu key required";
-        case BUILD_NEED_PACKAGE:  return "xeBuild data package incomplete on SD";
-        case BUILD_BAD_DUMP:      return "dump not recognised as a 360 NAND";
-        case BUILD_NOT_VERIFIED:  return "image built but crypto stages not yet bench-verified";
-        default:                  return "error";
+        case BUILD_OK:            return "Verified";
+        case BUILD_NEED_CPU_KEY:  return "CPU key needed";
+        case BUILD_NEED_PACKAGE:  return "Data pkg missing";
+        case BUILD_BAD_DUMP:      return "Bad dump";
+        case BUILD_NOT_VERIFIED:  return "Not verified";
+        default:                  return "Build error";
     }
 }
 
@@ -61,13 +65,6 @@ static void set_stage(build_progress_t *p, const char *s, int pct)
     ESP_LOGI(TAG, "[%d%%] %s", pct, s);
 }
 
-/*
- * The required ingredient set for a Trinity glitch image. Filenames follow the
- * xeBuild data/ naming. The CB set is dashboard/CB-version specific, so the
- * final filenames are resolved against what the user actually dropped on the
- * card (see README — the user tells us the target). These defaults match a
- * common Trinity glitch2 (RGH) target and are overridden if absent.
- */
 static xebuild_ingredient_t g_ingredients[] = {
     { "cb.bin",           "CB bootloader",       true,  false, 0 },
     { "cbb.bin",          "CB_B bootloader",     true,  false, 0 },
@@ -80,93 +77,135 @@ static xebuild_ingredient_t g_ingredients[] = {
 };
 #define N_INGREDIENTS (sizeof(g_ingredients)/sizeof(g_ingredients[0]))
 
-build_status_t build_rgh_image(const uint8_t *raw_dump, uint32_t raw_len,
+/* Chunked file copy (start of the image = the user's own raw dump). */
+static bool copy_file(const char *src, const char *dst,
+                      build_progress_t *prog, int p0, int p1)
+{
+    const size_t chunk = (size_t)COPY_PAGES * NAND_PAGE_RAW;
+    uint8_t *buf = malloc(chunk);
+    FILE *in = fopen(src, "rb");
+    FILE *out = fopen(dst, "wb");
+    bool ok = (buf && in && out);
+
+    size_t total = 0, n;
+    while (ok && (n = fread(buf, 1, chunk, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+        total += n;
+        set_stage(prog, "assembling glitch image",
+                  p0 + (int)((uint64_t)total * (p1 - p0) / NAND_16MB_RAW_BYTES));
+    }
+    if (ok && total != NAND_16MB_RAW_BYTES) ok = false;
+
+    if (in) fclose(in);
+    if (out && fclose(out) != 0) ok = false;
+    free(buf);
+    return ok;
+}
+
+/* 1 = identical, 0 = differ, -1 = I/O error. */
+static int files_equal(const char *a, const char *b)
+{
+    const size_t chunk = (size_t)COPY_PAGES * NAND_PAGE_RAW;
+    uint8_t *ba = malloc(chunk), *bb = malloc(chunk);
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    int res = -1;
+
+    if (ba && bb && fa && fb) {
+        res = 1;
+        for (;;) {
+            size_t na = fread(ba, 1, chunk, fa);
+            size_t nb = fread(bb, 1, chunk, fb);
+            if (na != nb || memcmp(ba, bb, na) != 0) { res = 0; break; }
+            if (na == 0) break;
+        }
+    }
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    free(ba);
+    free(bb);
+    return res;
+}
+
+build_status_t build_rgh_image(const char *dump_path,
                                const uint8_t cpu_key[16],
-                               uint8_t *out_image,
+                               const char *out_path,
                                build_progress_t *prog)
 {
+    build_status_t res = BUILD_ERROR;
+    uint8_t *raw = NULL, *logical = NULL;
+    xenon_secrets_t *secrets = NULL;
+    FILE *f = NULL;
+
     if (prog) prog->status = BUILD_ERROR;
+    if (!dump_path || !out_path) return BUILD_ERROR;
 
-    if (!raw_dump || !out_image || raw_len < NAND_PAGE_RAW) {
+    struct stat sb;
+    if (stat(dump_path, &sb) != 0 || (uint32_t)sb.st_size != NAND_16MB_RAW_BYTES) {
         return BUILD_BAD_DUMP;
     }
 
-    uint32_t pages = raw_len / NAND_PAGE_RAW;
-
-    /* --- Stage 1: strip spare -> flat logical image (safe, pure) --- */
-    set_stage(prog, "de-ECC: raw -> logical", 5);
-    uint8_t *logical = heap_caps_malloc((size_t)pages * NAND_PAGE_DATA,
-                                        MALLOC_CAP_SPIRAM);
-    if (!logical) {
-        ESP_LOGE(TAG, "no PSRAM for logical image");
-        return BUILD_ERROR;
+    /* --- Stage 1: read only the header region, strip spare --- */
+    set_stage(prog, "reading dump header", 5);
+    raw     = malloc((size_t)HDR_PAGES * NAND_PAGE_RAW);
+    logical = malloc((size_t)HDR_PAGES * NAND_PAGE_DATA);
+    f = fopen(dump_path, "rb");
+    if (!raw || !logical || !f ||
+        fread(raw, NAND_PAGE_RAW, HDR_PAGES, f) != HDR_PAGES) {
+        ESP_LOGE(TAG, "cannot read dump header");
+        goto out;
     }
-    nand_raw_to_logical(raw_dump, pages, logical);
+    fclose(f); f = NULL;
+    nand_raw_to_logical(raw, HDR_PAGES, logical);
 
-    /* --- Stage 2: locate per-console secrets --- */
+    /* --- Stage 2: locate per-console secrets (heap: struct is >16 KB) --- */
     set_stage(prog, "extracting console secrets", 15);
-    xenon_secrets_t secrets;
-    int er = xenon_extract_secrets(logical, pages * NAND_PAGE_DATA, &secrets);
-    if (er < 0) {
-        heap_caps_free(logical);
-        return BUILD_BAD_DUMP;
+    secrets = calloc(1, sizeof(*secrets));
+    if (!secrets) goto out;
+    if (xenon_extract_secrets(logical, HDR_PAGES * NAND_PAGE_DATA, secrets) < 0) {
+        res = BUILD_BAD_DUMP;
+        goto out;
     }
-
-    if (!cpu_key) {
-        heap_caps_free(logical);
-        return BUILD_NEED_CPU_KEY;
-    }
-    xenon_set_cpu_key(&secrets, cpu_key);
+    if (!cpu_key) { res = BUILD_NEED_CPU_KEY; goto out; }
+    xenon_set_cpu_key(secrets, cpu_key);
 
     /* --- Stage 3: validate the SD package --- */
     set_stage(prog, "checking xeBuild data package", 25);
-    if (!sd_is_mounted()) {
-        heap_caps_free(logical);
-        return BUILD_NEED_PACKAGE;
-    }
-    int missing = sd_check_package(g_ingredients, N_INGREDIENTS);
-    if (missing > 0) {
-        heap_caps_free(logical);
-        return BUILD_NEED_PACKAGE;
+    if (!sd_is_mounted() || sd_check_package(g_ingredients, N_INGREDIENTS) > 0) {
+        res = BUILD_NEED_PACKAGE;
+        goto out;
     }
 
-    /* --- Stage 4: keyvault decrypt + verify (GATED) --- */
+    /* --- Stage 4: keyvault decrypt + verify (GATED, placeholder) --- */
     set_stage(prog, "keyvault decrypt + verify", 40);
-    /*
-     * Real work here: AES-decrypt the keyvault with a key derived from the CPU
-     * key, verify its hash, pull DSN/console certs. Implemented in the crypto
-     * module once parity-verified. Until then this stage is a no-op placeholder
-     * and the final return is forced to BUILD_NOT_VERIFIED below.
-     */
 
-    /* --- Stage 5: assemble image from ingredients (data plumbing) --- */
-    set_stage(prog, "assembling glitch image", 60);
-    /*
-     * Copy the user's preserved regions (keyvault, SMC config, CPU-specific
-     * data) from `logical` into the new image, then lay the CB/CBB/CD/CE and
-     * patch set from the SD package into their slots at the documented offsets.
-     * This is deterministic layout work. Left as the integration point; the
-     * offsets come from the nand header parsed in stage 2.
-     */
-    memcpy(out_image, raw_dump, raw_len); /* start from the user's own raw dump */
+    /* --- Stage 5: assemble image (placeholder: copy of the user's dump) --- */
+    set_stage(prog, "assembling glitch image", 45);
+    if (!copy_file(dump_path, out_path, prog, 45, 85)) {
+        ESP_LOGE(TAG, "image write failed");
+        res = BUILD_ERROR;
+        goto out;
+    }
 
-    /* --- Stage 6: regenerate ECC -> raw (GATED on ECC verification) --- */
-    set_stage(prog, "regenerating ECC", 85);
-    /* When ingredient data is laid into `logical`, convert back to raw here:
-     *   nand_logical_to_raw(logical, pages, out_image);
-     * Gated: only trust this once BUILD_ECC_VERIFIED. */
+    /* --- Stage 6: regenerate ECC (NOT implemented; must also stream) --- */
+    set_stage(prog, "regenerating ECC", 90);
 
-    heap_caps_free(logical);
-
+    /* --- Stage 7: parity check against a known-good J-Runner image --- */
+    set_stage(prog, "parity check vs REFIMG.BIN", 95);
+    res = BUILD_NOT_VERIFIED;
+    if (stat(REF_FILE, &sb) == 0 && (uint32_t)sb.st_size == NAND_16MB_RAW_BYTES &&
+        files_equal(REF_FILE, dump_path) == 0 &&   /* a glitch image != retail dump */
+        files_equal(REF_FILE, out_path) == 1) {
+        res = BUILD_OK;
+    } else {
+        ESP_LOGW(TAG, "no parity with %s: image NOT certified for flashing", REF_FILE);
+    }
     set_stage(prog, "done", 100);
 
-#if BUILD_ECC_VERIFIED && BUILD_CRYPTO_VERIFIED
-    if (prog) prog->status = BUILD_OK;
-    return BUILD_OK;
-#else
-    ESP_LOGW(TAG, "image built but crypto/ECC not bench-verified — refusing to "
-                  "certify for flashing");
-    if (prog) prog->status = BUILD_NOT_VERIFIED;
-    return BUILD_NOT_VERIFIED;
-#endif
+out:
+    if (f) fclose(f);
+    free(raw);
+    free(logical);
+    free(secrets);
+    if (prog) prog->status = res;
+    return res;
 }

@@ -1,21 +1,22 @@
+
 /*
- * ui.c — standalone on-screen UI for TrinityWeb360, driven by two buttons.
+ * ui.c — on-screen UI for TrinityWeb360, driven by two push buttons.
  *
  * GPL-3.0. See LICENSE.
  *
  * Layout (320x240 landscape):
- *   title bar
- *   status line (current stage / result)
- *   console info line (flash config)
- *   progress bar + percent
- *   hint line (next step)
- *   description of the highlighted button
- *   4 buttons: FND | DMP | BLD | FLSH   (one is highlighted)
+ *   header bar with a console-link dot
+ *   status card: stage, console info, progress bar, percent, hint
+ *   description of the highlighted action
+ *   4 buttons: FND | DMP | BLD | FLSH, each with a "done" marker
+ *   control hint
  *
- * Controls (see pins.h): RIGHT cycles the highlight and wraps from FLSH back
- * to FND; SELECT runs the highlighted action. No touch screen, WiFi, or PC is
- * needed. The CPU key for Build is read from /sd/cpukey.txt.
+ * Controls:
+ *   RIGHT cycles the highlight and wraps from FLSH back to FND.
+ *   SELECT runs the highlighted action.
+ *   The CPU key for Build is read from /sd/cpukey.txt.
  */
+
 #include "ui.h"
 
 #include <stdio.h>
@@ -30,211 +31,515 @@
 #include "jobs.h"
 #include "sdcard.h"
 
-/* lcd.h has no maroon; define it here if it isn't provided (RGB565). */
-#ifndef C_MAROON
-#define C_MAROON 0x8000
-#endif
+/* ---- Xbox green palette ---- */
 
-#define BG       C_BLACK
-#define TITLE_BG C_MAROON
-#define BTN_BG   C_DGRAY
-#define BTN_HI   C_BLUE
+#define COL_BG     RGB565(0x03, 0x0B, 0x06)
+#define COL_HEAD   RGB565(0x05, 0x2B, 0x13)
+#define COL_PANEL  RGB565(0x0B, 0x1C, 0x11)
+#define COL_EDGE   RGB565(0x1B, 0x5A, 0x32)
+#define COL_TRACK  RGB565(0x02, 0x08, 0x04)
+#define COL_DIM    RGB565(0x78, 0xB8, 0x8A)
+#define COL_ACCENT RGB565(0x39, 0xFF, 0x70)
+#define COL_SEL    RGB565(0x0B, 0x5C, 0x2A)
+#define COL_OK     RGB565(0x65, 0xFF, 0x8A)
+#define COL_WARN   RGB565(0xC8, 0xF5, 0x4B)
+#define COL_ERR    RGB565(0xFF, 0x4A, 0x4A)
+
+/* ---- geometry ---- */
+
+#define CARD_X 8
+#define CARD_Y 38
+#define CARD_W 304
+#define CARD_H 100
+
+#define BAR_X 18
+#define BAR_Y 80
+#define BAR_W 284
+#define BAR_H 20
+
+#define BTN_Y 160
+#define BTN_H 60
 
 #define N_BTNS 4
 
-typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED } btn_state_t;
+typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED, BS_DISABLED } btn_state_t;
 
 typedef struct {
-    int x, y, w, h;
+    int x, w;
     const char *label;
     const char *desc;
     job_t job;
 } btn_t;
 
-/* bottom row of 4 buttons */
 static const btn_t s_btns[N_BTNS] = {
-    { 4,   188, 74, 46, "FND",  "FND: find console",          JOB_NONE  },
-    { 84,  188, 74, 46, "DMP",  "DMP: dump NAND (3 reads)",   JOB_DUMP  },
-    { 164, 188, 74, 46, "BLD",  "BLD: build image",           JOB_BUILD },
-    { 244, 188, 72, 46, "FLSH", "FLSH: flash + verify",       JOB_FLASH },
+    { 6,   74, "FND",  "FND: find console",        JOB_NONE  },
+    { 84,  74, "DMP",  "DMP: dump NAND (2 reads)", JOB_DUMP  },
+    { 162, 74, "BLD",  "BLD: build image",         JOB_BUILD },
+    { 240, 74, "FLSH", "FLSH: flash + verify",     JOB_FLASH },
 };
 
-static int s_sel = 0; /* highlighted button */
+static int s_sel = 0;
+static bool s_done[N_BTNS];
+static bool s_console_ready = false;
 
-/* scale 1 = 8px/char, scale 2 = 16px/char */
-static void text_center(int y, const char *s, uint16_t fg, uint16_t bg, int scale)
+/* ---- small drawing helpers ---- */
+
+static uint16_t mix(uint16_t a, uint16_t b, int t)
+{
+    int ar = (a >> 11) & 31, ag = (a >> 5) & 63, ab = a & 31;
+    int br = (b >> 11) & 31, bg = (b >> 5) & 63, bb = b & 31;
+
+    int r = ar + (br - ar) * t / 255;
+    int g = ag + (bg - ag) * t / 255;
+    int l = ab + (bb - ab) * t / 255;
+
+    return (uint16_t)((r << 11) | (g << 5) | l);
+}
+
+/* filled rectangle with 2px rounded corners */
+
+static void rrect(int x, int y, int w, int h, uint16_t c)
+{
+    lcd_fill_rect(x + 2, y,         w - 4, 1, c);
+    lcd_fill_rect(x + 1, y + 1,     w - 2, 1, c);
+    lcd_fill_rect(x,     y + 2,     w,     h - 4, c);
+    lcd_fill_rect(x + 1, y + h - 2, w - 2, 1, c);
+    lcd_fill_rect(x + 2, y + h - 1, w - 4, 1, c);
+}
+
+/* rounded panel */
+
+static void panel(int x, int y, int w, int h,
+                  uint16_t fill, uint16_t edge)
+{
+    rrect(x + 1, y + 1, w - 2, h - 2, fill);
+
+    lcd_fill_rect(x + 2, y,         w - 4, 1, edge);
+    lcd_fill_rect(x + 2, y + h - 1, w - 4, 1, edge);
+    lcd_fill_rect(x,     y + 2,     1, h - 4, edge);
+    lcd_fill_rect(x + w - 1, y + 2, 1, h - 4, edge);
+
+    lcd_fill_rect(x + 1,     y + 1,     1, 1, edge);
+    lcd_fill_rect(x + w - 2, y + 1,     1, 1, edge);
+    lcd_fill_rect(x + 1,     y + h - 2, 1, 1, edge);
+    lcd_fill_rect(x + w - 2, y + h - 2, 1, 1, edge);
+}
+
+/* centered text */
+
+static void text_c(int left, int width, int y, const char *s,
+                   uint16_t fg, uint16_t bg, int scale)
 {
     int tw = (int)strlen(s) * 8 * scale;
-    int x = (LCD_W - tw) / 2;
-    if (x < 0) x = 0;               /* too long: pin to left edge */
+
+    if (tw > width && scale > 1) {
+        scale = 1;
+        tw = (int)strlen(s) * 8;
+    }
+
+    int x = left + (width - tw) / 2;
+
+    if (x < left) x = left;
+
     lcd_text(x, y, s, fg, bg, scale);
 }
 
-static void draw_button(const btn_t *b, btn_state_t state)
-{
-    uint16_t fill = (state == BS_PRESSED)  ? C_GREEN
-                  : (state == BS_SELECTED) ? BTN_HI
-                  :                          BTN_BG;
-    lcd_fill_rect(b->x, b->y, b->w, b->h, fill);
-    lcd_rect(b->x, b->y, b->w, b->h, state == BS_NORMAL ? C_GRAY : C_WHITE);
-    if (state != BS_NORMAL) {       /* double border = highlighted */
-        lcd_rect(b->x + 1, b->y + 1, b->w - 2, b->h - 2, C_WHITE);
-    }
-    int tw = (int)strlen(b->label) * 16; /* scale 2 -> 16px/char */
-    int tx = b->x + (b->w - tw) / 2;
-    int ty = b->y + (b->h - 16) / 2;
-    lcd_text(tx, ty, b->label, C_WHITE, fill, 2);
-}
+/* ---- buttons ---- */
 
-static void draw_desc(void)
+static void draw_button(int i, btn_state_t state)
 {
-    lcd_fill_rect(0, 160, LCD_W, 12, BG);
-    text_center(162, s_btns[s_sel].desc, C_WHITE, BG, 1);
+    const btn_t *b = &s_btns[i];
+
+    bool disabled = (i != 0 && !s_console_ready);
+
+    uint16_t fill = disabled ? RGB565(0x18, 0x20, 0x1A)
+                  : (state == BS_PRESSED) ? COL_OK
+                  : (state == BS_SELECTED) ? COL_SEL
+                  : COL_PANEL;
+
+    uint16_t edge = disabled ? RGB565(0x35, 0x3B, 0x36)
+                  : (state == BS_NORMAL) ? COL_EDGE : COL_ACCENT;
+
+    uint16_t label_col = disabled ? RGB565(0x70, 0x78, 0x72) : C_WHITE;
+
+    panel(b->x, BTN_Y, b->w, BTN_H, fill, edge);
+
+    if (!disabled && state != BS_NORMAL) {
+        lcd_rect(b->x + 2, BTN_Y + 2,
+                 b->w - 4, BTN_H - 4,
+                 mix(COL_ACCENT, fill, 150));
+    }
+
+    /* Main label only — disabled actions are visibly greyed out. */
+    text_c(b->x, b->w, BTN_Y + 20,
+           b->label, label_col, fill, 2);
+
+    /* completed-step marker */
+    if (s_done[i]) {
+        rrect(b->x + b->w - 15, BTN_Y + 6, 8, 8, COL_OK);
+    }
 }
 
 static void draw_all_buttons(void)
 {
     for (int i = 0; i < N_BTNS; i++) {
-        draw_button(&s_btns[i], i == s_sel ? BS_SELECTED : BS_NORMAL);
+        draw_button(i, i == s_sel ? BS_SELECTED : BS_NORMAL);
     }
 }
+
+static void draw_desc(void)
+{
+    lcd_fill_rect(0, 146, LCD_W, 10, COL_BG);
+
+    text_c(0, LCD_W, 147,
+           s_btns[s_sel].desc,
+           mix(COL_ACCENT, C_WHITE, 90),
+           COL_BG, 1);
+}
+
+/* ---- progress bar ---- */
+
+static int s_bar_px = 0;
+
+static void bar_track(void)
+{
+    lcd_rect(BAR_X, BAR_Y, BAR_W, BAR_H, COL_EDGE);
+
+    lcd_fill_rect(BAR_X + 1, BAR_Y + 1,
+                  BAR_W - 2, BAR_H - 2, COL_TRACK);
+
+    s_bar_px = 0;
+}
+
+static void bar_segment(int px0, int w, uint16_t col)
+{
+    int inner_h = BAR_H - 4;
+    int top_h = inner_h * 4 / 10;
+
+    lcd_fill_rect(BAR_X + 2 + px0, BAR_Y + 2,
+                  w, top_h, mix(col, C_WHITE, 70));
+
+    lcd_fill_rect(BAR_X + 2 + px0, BAR_Y + 2 + top_h,
+                  w, inner_h - top_h, col);
+}
+
+static void draw_bar(int pct, uint16_t col, bool full)
+{
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    int px = (BAR_W - 4) * pct / 100;
+
+    if (full || px < s_bar_px) {
+        lcd_fill_rect(BAR_X + 1, BAR_Y + 1,
+                      BAR_W - 2, BAR_H - 2, COL_TRACK);
+
+        s_bar_px = 0;
+    }
+
+    if (px > s_bar_px) {
+        bar_segment(s_bar_px, px - s_bar_px, col);
+        s_bar_px = px;
+    }
+}
+
+/* ---- static frame ---- */
+
+static char s_last_stage[48];
+static char s_last_info[48];
+static char s_last_hint[32];
+
+static uint16_t s_last_scol;
+static uint16_t s_last_bar_col;
+
+static int s_last_pct;
+static bool s_last_linked;
 
 static void draw_static(void)
 {
-    lcd_fill(BG);
-    lcd_fill_rect(0, 0, LCD_W, 28, TITLE_BG);
-    text_center(6, "Trinity Flasher", C_WHITE, TITLE_BG, 2);
+    lcd_fill(COL_BG);
+
+    /* Header */
+    lcd_fill_rect(0, 0, LCD_W, 28, COL_HEAD);
+    lcd_fill_rect(0, 28, LCD_W, 2, COL_ACCENT);
+
+    text_c(0, LCD_W, 6,
+           "Trinity Flasher", C_WHITE, COL_HEAD, 2);
+
+    /* Status card */
+    panel(CARD_X, CARD_Y, CARD_W, CARD_H, COL_PANEL, COL_EDGE);
+
+    bar_track();
+
+    memset(s_done, 0, sizeof(s_done));
+
     draw_all_buttons();
     draw_desc();
+
+    text_c(0, LCD_W, 228,
+           "SELECT: run    RIGHT: next",
+           COL_DIM, COL_BG, 1);
+
+    /* Force next status update to repaint */
+    s_last_stage[0] = '\0';
+    s_last_info[0] = '\0';
+    s_last_hint[0] = '\0';
+
+    s_last_pct = -1;
+    s_last_scol = 0;
+    s_last_bar_col = 0;
+
+    rrect(12, 9, 12, 12,
+          mix(COL_HEAD, C_WHITE, 70));
+
+    s_last_linked = false;
 }
+
+/* ---- status card ---- */
 
 static void draw_status(const job_status_t *s)
 {
-    uint16_t col = s->done ? (s->ok ? C_GREEN : C_RED) : C_AMBER;
-
-    /* status line (centered) */
-    lcd_fill_rect(0, 34, LCD_W, 20, BG);
-    text_center(36, s->stage, col, BG, 2);
-
-    /* console info (centered) */
-    lcd_fill_rect(0, 62, LCD_W, 18, BG);
-    char line[48];
-    if (s->linked) {
-        snprintf(line, sizeof(line), "cfg 0x%08lX  dump:%s",
-                 (unsigned long)s->flash_config, s->have_dump ? "yes" : "no");
-    } else {
-        strcpy(line, "console: not detected");
+    if (s->linked != s_console_ready) {
+        s_console_ready = s->linked;
+        draw_all_buttons();
     }
-    text_center(62, line, C_GRAY, BG, 1);
 
-    /* progress bar */
-    int bx = 8, by = 92, bw = LCD_W - 16, bh = 26;
-    lcd_rect(bx, by, bw, bh, C_GRAY);
-    int fillw = (bw - 4) * s->percent / 100;
-    lcd_fill_rect(bx + 2, by + 2, bw - 4, bh - 4, BG);
-    if (fillw > 0) lcd_fill_rect(bx + 2, by + 2, fillw, bh - 4, col);
+    uint16_t col = s->done
+                 ? (s->ok ? COL_OK : COL_ERR)
+                 : COL_WARN;
 
-    /* percent label, below the bar, centered, solid background */
-    char pc[8];
-    snprintf(pc, sizeof(pc), "%d%%", s->percent);
-    lcd_fill_rect(0, 120, LCD_W, 10, BG);
-    text_center(121, pc, C_WHITE, BG, 1);
+    bool idle = (!s->done && strcmp(s->stage, "idle") == 0);
 
-    /* hint line (centered) */
-    lcd_fill_rect(0, 134, LCD_W, 16, BG);
-    const char *hint = s->flashable ? "img ready - select FLSH"
-                       : (s->have_dump ? "DMP saved - select BLD" : "select FND, then DMP");
-    text_center(136, hint, C_GRAY, BG, 1);
+    uint16_t scol = idle ? COL_DIM : col;
+
+    /* Console-link indicator */
+    if (s->linked != s_last_linked) {
+        rrect(12, 9, 12, 12,
+              s->linked ? COL_OK : mix(COL_HEAD, C_WHITE, 70));
+
+        s_last_linked = s->linked;
+    }
+
+    /* Stage */
+    if (strcmp(s->stage, s_last_stage) != 0 ||
+        scol != s_last_scol) {
+
+        lcd_fill_rect(CARD_X + 2, 44,
+                      CARD_W - 4, 16, COL_PANEL);
+
+        text_c(CARD_X, CARD_W, 44,
+               s->stage, scol, COL_PANEL, 2);
+
+        snprintf(s_last_stage, sizeof(s_last_stage),
+                 "%s", s->stage);
+
+        s_last_scol = scol;
+    }
+
+    /* Console information */
+    char info[48];
+
+    if (s->linked) {
+        snprintf(info, sizeof(info),
+                 "cfg 0x%08lX   dump: %s",
+                 (unsigned long)s->flash_config,
+                 s->have_dump ? "yes" : "no");
+    } else {
+        snprintf(info, sizeof(info),
+                 "console: not detected");
+    }
+
+    if (strcmp(info, s_last_info) != 0) {
+        lcd_fill_rect(CARD_X + 2, 64,
+                      CARD_W - 4, 8, COL_PANEL);
+
+        text_c(CARD_X, CARD_W, 64,
+               info, COL_DIM, COL_PANEL, 1);
+
+        snprintf(s_last_info, sizeof(s_last_info),
+                 "%s", info);
+    }
+
+    /* Progress bar */
+    draw_bar(s->percent, col, col != s_last_bar_col);
+
+    s_last_bar_col = col;
+
+    /* Percentage */
+    if (s->percent != s_last_pct) {
+        char pc[8];
+
+        snprintf(pc, sizeof(pc), "%d%%", s->percent);
+
+        lcd_fill_rect(CARD_X + 2, 106,
+                      CARD_W - 4, 8, COL_PANEL);
+
+        text_c(CARD_X, CARD_W, 106,
+               pc, C_WHITE, COL_PANEL, 1);
+
+        s_last_pct = s->percent;
+    }
+
+    /* Status hint */
+    const char *hint = s->flashable
+                     ? "image ready - select FLSH"
+                     : (s->have_dump
+                        ? "dump saved - select BLD"
+                        : "select FND, then DMP");
+
+    if (strcmp(hint, s_last_hint) != 0) {
+        lcd_fill_rect(CARD_X + 2, 120,
+                      CARD_W - 4, 8, COL_PANEL);
+
+        text_c(CARD_X, CARD_W, 120,
+               hint, COL_DIM, COL_PANEL, 1);
+
+        snprintf(s_last_hint, sizeof(s_last_hint),
+                 "%s", hint);
+    }
+
+    /* Completed-step markers */
+    bool done[N_BTNS] = {
+        s->linked,
+        s->have_dump,
+        s->flashable,
+        s->done && s->ok &&
+        strcmp(s->stage, "Flash verified") == 0,
+    };
+
+    for (int i = 0; i < N_BTNS; i++) {
+        if (done[i] != s_done[i]) {
+            s_done[i] = done[i];
+
+            draw_button(i,
+                        i == s_sel ? BS_SELECTED : BS_NORMAL);
+        }
+    }
 }
 
-/* ---- push buttons (active low, internal pull-up) ---- */
+/* ---- push buttons ---- */
 
-typedef struct { int pin; int prev; } pushbtn_t;
+typedef struct {
+    int pin;
+    int prev;
+} pushbtn_t;
 
-static pushbtn_t s_right  = { PIN_BTN_RIGHT,  1 };
-static pushbtn_t s_select = { PIN_BTN_SELECT, 1 };
+static pushbtn_t s_right = {
+    PIN_BTN_RIGHT, 1
+};
+
+static pushbtn_t s_select = {
+    PIN_BTN_SELECT, 1
+};
 
 static void buttons_init(void)
 {
     gpio_config_t in = {
-        .pin_bit_mask = (1ULL << PIN_BTN_RIGHT) | (1ULL << PIN_BTN_SELECT),
+        .pin_bit_mask =
+            (1ULL << PIN_BTN_RIGHT) |
+            (1ULL << PIN_BTN_SELECT),
+
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
+
     gpio_config(&in);
 }
 
-/* True once per press (falling edge, debounced). Holding does not repeat. */
+/* Debounced button press detection */
+
 static bool pushed(pushbtn_t *b)
 {
     int lvl = gpio_get_level(b->pin);
+
     bool ev = false;
+
     if (lvl == 0 && b->prev == 1) {
-        vTaskDelay(pdMS_TO_TICKS(15));          /* debounce */
+        vTaskDelay(pdMS_TO_TICKS(15));
+
         ev = (gpio_get_level(b->pin) == 0);
     }
+
     b->prev = lvl;
+
     return ev;
 }
 
+/* ---- navigation ---- */
+
 static void move_right(void)
 {
+    if (!s_console_ready) {
+        /* Until FND succeeds, DMP/BLD/FLSH are unavailable. */
+        s_sel = 0;
+        draw_button(0, BS_SELECTED);
+        draw_desc();
+        return;
+    }
+
     int old = s_sel;
-    s_sel = (s_sel + 1) % N_BTNS;               /* FLSH wraps back to FND */
-    draw_button(&s_btns[old], BS_NORMAL);
-    draw_button(&s_btns[s_sel], BS_SELECTED);
+    s_sel = (s_sel + 1) % N_BTNS;
+
+    draw_button(old, BS_NORMAL);
+    draw_button(s_sel, BS_SELECTED);
+
     draw_desc();
 }
+
+/* ---- execute selected action ---- */
 
 static void run_selected(void)
 {
     const btn_t *b = &s_btns[s_sel];
 
-    draw_button(b, BS_PRESSED);
+    draw_button(s_sel, BS_PRESSED);
+
     vTaskDelay(pdMS_TO_TICKS(150));
-    draw_button(b, BS_SELECTED);
+
+    draw_button(s_sel, BS_SELECTED);
 
     if (b->job == JOB_NONE) {
         jobs_detect();
     } else {
-        if (b->job == JOB_BUILD) {
-            jobs_load_cpukey_from_sd(); /* best-effort */
+        job_status_t current;
+        jobs_get(&current);
+
+        if (!current.linked) {
+            /* Safety: never start DMP/BLD/FLSH before successful FND. */
+            return;
         }
+
+        if (b->job == JOB_BUILD) {
+            jobs_load_cpukey_from_sd();
+        }
+
         jobs_start(b->job);
     }
 }
 
+/* ---- main UI task ---- */
+
 static void ui_task(void *arg)
 {
     buttons_init();
+
     draw_static();
 
     job_status_t st;
+
     jobs_get(&st);
+
     draw_status(&st);
 
-    int last_pct = -1;
-    bool last_done = false, last_linked = false, last_dump = false;
-    char last_stage[32] = "";
     uint32_t tick = 0;
 
     for (;;) {
-        /* refresh status when it changes (every ~100 ms) */
         if ((tick++ % 5) == 0) {
             jobs_get(&st);
-            if (st.percent != last_pct || st.done != last_done ||
-                st.linked != last_linked || st.have_dump != last_dump ||
-                strncmp(st.stage, last_stage, sizeof(last_stage)) != 0) {
-                draw_status(&st);
-                last_pct = st.percent;
-                last_done = st.done;
-                last_linked = st.linked;
-                last_dump = st.have_dump;
-                strncpy(last_stage, st.stage, sizeof(last_stage) - 1);
-                last_stage[sizeof(last_stage) - 1] = '\0';
-            }
+
+            draw_status(&st);
         }
 
         if (pushed(&s_right)) {
@@ -243,9 +548,13 @@ static void ui_task(void *arg)
 
         if (pushed(&s_select)) {
             jobs_get(&st);
-            if (!st.busy) {             /* ignore SELECT while a job runs */
+
+            if (!st.busy) {
                 run_selected();
-                last_pct = -1;          /* force status redraw */
+
+                jobs_get(&st);
+
+                draw_status(&st);
             }
         }
 
