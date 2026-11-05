@@ -102,28 +102,48 @@ static bool copy_file(const char *src, const char *dst,
     return ok;
 }
 
-/* 1 = identical, 0 = differ, -1 = I/O error. */
-static int files_equal(const char *a, const char *b)
+/* Compare two files. Returns 1 identical, 0 differ, -1 I/O error.
+ * On difference, *diff_off gets the byte offset of the first mismatch and the
+ * 16-byte windows around it are logged — this is what the bench-iteration loop
+ * uses to pin down a layout detail against a known-good REFIMG.BIN. */
+static int files_first_diff(const char *a, const char *b, long *diff_off)
 {
     const size_t chunk = (size_t)COPY_PAGES * NAND_PAGE_RAW;
     uint8_t *ba = malloc(chunk), *bb = malloc(chunk);
     FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
     int res = -1;
+    long base = 0;
 
     if (ba && bb && fa && fb) {
         res = 1;
         for (;;) {
             size_t na = fread(ba, 1, chunk, fa);
             size_t nb = fread(bb, 1, chunk, fb);
-            if (na != nb || memcmp(ba, bb, na) != 0) { res = 0; break; }
+            size_t n = na < nb ? na : nb;
+            for (size_t i = 0; i < n; i++) {
+                if (ba[i] != bb[i]) {
+                    if (diff_off) *diff_off = base + (long)i;
+                    ESP_LOGW(TAG, "first diff @ 0x%lX: ref=%02X build=%02X",
+                             base + (long)i, bb[i], ba[i]);
+                    res = 0;
+                    goto done;
+                }
+            }
+            if (na != nb) { if (diff_off) *diff_off = base + (long)n; res = 0; goto done; }
             if (na == 0) break;
+            base += (long)na;
         }
     }
+done:
     if (fa) fclose(fa);
     if (fb) fclose(fb);
     free(ba);
     free(bb);
     return res;
+}
+static int files_equal(const char *a, const char *b)
+{
+    return files_first_diff(a, b, NULL);
 }
 
 build_status_t build_rgh_image(const char *dump_path,
@@ -195,11 +215,19 @@ build_status_t build_rgh_image(const char *dump_path,
     set_stage(prog, "parity check vs REFIMG.BIN", 95);
     res = BUILD_NOT_VERIFIED;
     if (stat(REF_FILE, &sb) == 0 && (uint32_t)sb.st_size == NAND_16MB_RAW_BYTES &&
-        files_equal(REF_FILE, dump_path) == 0 &&   /* a glitch image != retail dump */
-        files_equal(REF_FILE, out_path) == 1) {
-        res = BUILD_OK;
+        files_equal(REF_FILE, dump_path) == 0) {   /* a glitch image != retail dump */
+        long diff = -1;
+        int eq = files_first_diff(REF_FILE, out_path, &diff);
+        if (eq == 1) {
+            res = BUILD_OK;
+        } else if (eq == 0) {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "differs @ 0x%lX vs REFIMG", diff);
+            set_stage(prog, msg, 95);
+            ESP_LOGW(TAG, "image differs from REFIMG at 0x%lX - not flashable", diff);
+        }
     } else {
-        ESP_LOGW(TAG, "no parity with %s: image NOT certified for flashing", REF_FILE);
+        ESP_LOGW(TAG, "no usable %s: image NOT certified for flashing", REF_FILE);
     }
     set_stage(prog, "done", 100);
 
