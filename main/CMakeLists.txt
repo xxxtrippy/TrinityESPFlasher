@@ -18,6 +18,7 @@ idf_component_register(
         "xecrypt_bl.c"
         "smc.c"
         "patches.c"
+        "boot_region.c"
         "build_image.c"
         "rgb.c"
         "kuart.c"
