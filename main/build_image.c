@@ -156,6 +156,7 @@ build_status_t build_rgh_image(const char *dump_path,
     }
     fclose(f); f = NULL;
     nand_raw_to_logical(raw, HDR_PAGES, logical);
+    free(raw); raw = NULL;               /* done with the raw header buffer */
 
     /* --- Stage 2: locate per-console secrets (heap: struct is >16 KB) --- */
     set_stage(prog, "extracting console secrets", 15);
@@ -165,6 +166,7 @@ build_status_t build_rgh_image(const char *dump_path,
         res = BUILD_BAD_DUMP;
         goto out;
     }
+    free(logical); logical = NULL;       /* secrets extracted; logical no longer needed */
     if (!cpu_key) { res = BUILD_NEED_CPU_KEY; goto out; }
     xenon_set_cpu_key(secrets, cpu_key);
 
