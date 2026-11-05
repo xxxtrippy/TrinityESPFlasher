@@ -13,6 +13,7 @@
  *   GET  /api/progress  SSE live progress from jobs_get()
  *   GET  /dump.bin      download the last verified dump (NANDDUMP.BIN)
  */
+#include "kuart.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -350,6 +351,17 @@ static esp_err_t h_fs_rename(httpd_req_t *r)
     return httpd_resp_sendstr(r, "{\"ok\":true}");
 }
 
+static esp_err_t h_uart(httpd_req_t *r)
+{
+    static char buf[KUART_LOG_SZ + 1];
+    char key[33];
+    size_t n = kuart_log_copy(buf, sizeof(buf));
+    buf[n] = 0;
+    httpd_resp_set_type(r, "text/plain");
+    httpd_resp_set_hdr(r, "X-Cpu-Key", kuart_cpukey(key) ? key : "");
+    return httpd_resp_send(r, buf, n);
+}
+
 static void reg(httpd_handle_t s, const char *uri, httpd_method_t m,
                 esp_err_t (*fn)(httpd_req_t *))
 {
@@ -377,6 +389,7 @@ void web_server_start(void)
     reg(srv, "/api/build",    HTTP_POST, h_build);
     reg(srv, "/api/flash",    HTTP_POST, h_flash);
     reg(srv, "/api/progress", HTTP_GET,  h_progress);
+    reg(srv, "/api/uart",     HTTP_GET,  h_uart);
     reg(srv, "/dump.bin",     HTTP_GET,  h_dump_bin);
     /* SD file manager (confined to /sd) */
     reg(srv, "/api/fs/list",   HTTP_GET,  h_fs_list);

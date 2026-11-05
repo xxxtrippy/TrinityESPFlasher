@@ -8,6 +8,7 @@
  * interface. Dump / Build / Flash are driven from on-screen buttons; the CPU
  * key for Build is read from /sd/cpukey.txt.
  */
+#include "kuart.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -50,6 +51,7 @@ void app_main(void)
     }
 
     xbox_init();
+    kuart_start();
     jobs_init();
     ui_start();
 

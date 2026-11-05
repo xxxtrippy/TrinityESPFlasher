@@ -15,8 +15,14 @@
  * Common ground is mandatory.
  */
 
-/* Status LED (S3-DevKitC-1 addressable LED is GPIO48; a plain LED works too) */
-#define PFC_LED_PIN 2
+/*
+ * --- Xbox kernel debug UART (UART1, 115200 8N1, 3.3V) ---
+ *   GPIO1 (TX) -> KER_DBG_RXD
+ *   GPIO2 (RX) <- KER_DBG_TXD
+ * xeLL prints the CPU key here; it is captured to /sd/cpukey.txt.
+ */
+#define KUART_TX 1
+#define KUART_RX 2
 
 /* --- Xbox 360 SB flash SPI (J2C1 header) --- */
 #define SPI_MISO 13
