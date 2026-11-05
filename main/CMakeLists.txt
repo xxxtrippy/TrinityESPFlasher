@@ -10,6 +10,7 @@ idf_component_register(
         "jobs.c"
         "wifi.c"
         "web_server.c"
+        "sdfm.c"
         "spiex.c"
         "xbox.c"
         "nand_ecc.c"
