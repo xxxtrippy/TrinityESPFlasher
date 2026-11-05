@@ -8,21 +8,35 @@
 #include "rgb.h"
 
 #include <stdint.h>
+#include <string.h>
 
 #include "esp_log.h"
-#include "led_strip.h"
-#include "led_strip_rmt.h"
+#include "driver/rmt_tx.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/*
+ * Drives the onboard WS2812 directly with the ESP-IDF core RMT TX driver
+ * (esp_driver_rmt) — no external led_strip component, so it builds natively
+ * everywhere with no component-registry fetch.
+ */
+
 #define RGB_GPIO             48
-#define RGB_LED_COUNT        1
 #define RGB_BRIGHTNESS       32
 #define RGB_ACTIVITY_MS      333
 #define RGB_FAILURE_MS       1000
 
+/* RMT at 10 MHz -> 0.1 us per tick. WS2812 bit timings (ticks). */
+#define RMT_RES_HZ           (10 * 1000 * 1000)
+#define T0H 4   /* 0.4us */
+#define T0L 8   /* 0.8us */
+#define T1H 8   /* 0.8us */
+#define T1L 4   /* 0.4us */
+
 static const char *TAG = "rgb";
-static led_strip_handle_t rgb_strip = NULL;
+static rmt_channel_handle_t rgb_chan = NULL;
+static rmt_encoder_handle_t rgb_enc  = NULL;
+static bool rgb_ok = false;
 
 typedef enum {
     RGB_STATE_READY,
@@ -40,11 +54,13 @@ static volatile rgb_state_t rgb_state = RGB_STATE_READY;
 
 static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
 {
-    if (rgb_strip == NULL) return;
+    if (!rgb_ok) return;
 
-    esp_err_t ret = led_strip_set_pixel(rgb_strip, 0, r, g, b);
-    if (ret == ESP_OK) ret = led_strip_refresh(rgb_strip);
-
+    /* WS2812 wants GRB order, MSB first. */
+    uint8_t grb[3] = { g, r, b };
+    rmt_transmit_config_t tx = { .loop_count = 0 };
+    esp_err_t ret = rmt_transmit(rgb_chan, rgb_enc, grb, sizeof(grb), &tx);
+    if (ret == ESP_OK) ret = rmt_tx_wait_all_done(rgb_chan, 100);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "RGB update failed: %s", esp_err_to_name(ret));
     }
@@ -117,36 +133,46 @@ static void rgb_animation_task(void *arg)
 
 bool rgb_init(void)
 {
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = RGB_GPIO,
-        .max_leds = RGB_LED_COUNT,
-        .led_model = LED_MODEL_WS2812,
-        .flags.invert_out = false,
-    };
-
-    led_strip_rmt_config_t rmt_config = {
+    rmt_tx_channel_config_t chan_cfg = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10 * 1000 * 1000,
+        .gpio_num = RGB_GPIO,
         .mem_block_symbols = 64,
-        .flags.with_dma = false,
+        .resolution_hz = RMT_RES_HZ,
+        .trans_queue_depth = 4,
     };
-
-    esp_err_t ret = led_strip_new_rmt_device(
-        &strip_config, &rmt_config, &rgb_strip);
-
+    esp_err_t ret = rmt_new_tx_channel(&chan_cfg, &rgb_chan);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "RGB initialization failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "RGB RMT channel failed: %s", esp_err_to_name(ret));
         return false;
     }
+
+    /* Bytes encoder: map each 0/1 bit to its WS2812 pulse. */
+    rmt_bytes_encoder_config_t enc_cfg = {
+        .bit0 = { .level0 = 1, .duration0 = T0H, .level1 = 0, .duration1 = T0L },
+        .bit1 = { .level0 = 1, .duration0 = T1H, .level1 = 0, .duration1 = T1L },
+        .flags.msb_first = 1,
+    };
+    ret = rmt_new_bytes_encoder(&enc_cfg, &rgb_enc);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RGB encoder failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = rmt_enable(rgb_chan);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RGB enable failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    rgb_ok = true;
 
     if (xTaskCreate(rgb_animation_task, "rgb_anim", 2048, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Could not create RGB animation task");
-        led_strip_clear(rgb_strip);
-        rgb_strip = NULL;
+        rgb_ok = false;
         return false;
     }
 
-    ESP_LOGI(TAG, "RGB LED initialized on GPIO%d", RGB_GPIO);
+    ESP_LOGI(TAG, "RGB LED initialized on GPIO%d (core RMT)", RGB_GPIO);
     rgb_ready();
     return true;
 }

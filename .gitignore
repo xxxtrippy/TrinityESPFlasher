@@ -24,4 +24,3 @@ cpukey*.txt
 dump*.bin
 nand*.bin
 build_log*.txt
-components/

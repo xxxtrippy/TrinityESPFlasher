@@ -29,5 +29,5 @@ idf_component_register(
         fatfs
         sdmmc
         esp_timer
-        led_strip
+        esp_driver_rmt
 )
