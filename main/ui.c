@@ -79,7 +79,6 @@ static const btn_t s_btns[N_BTNS] = {
 };
 
 static int s_sel = 0;
-static bool s_done[N_BTNS];
 static bool s_console_ready = false;   /* FND succeeded (console linked)  */
 static bool s_have_dump = false;       /* a verified dump is on the card  */
 static bool s_flashable = false;       /* a verified image is ready       */
@@ -193,11 +192,6 @@ static void draw_button(int i, btn_state_t state)
     /* Main label only — disabled actions are visibly greyed out. */
     text_c(b->x, b->w, BTN_Y + 20,
            b->label, label_col, fill, 2);
-
-    /* completed-step marker — never shown on DMP */
-    if (s_done[i] && i != 1) {
-        rrect(b->x + b->w - 15, BTN_Y + 6, 8, 8, COL_OK);
-    }
 }
 
 static void draw_all_buttons(void)
@@ -290,8 +284,6 @@ static void draw_static(void)
     panel(CARD_X, CARD_Y, CARD_W, CARD_H, COL_PANEL, COL_EDGE);
 
     bar_track();
-
-    memset(s_done, 0, sizeof(s_done));
 
     draw_all_buttons();
     draw_desc();
@@ -436,23 +428,6 @@ static void draw_status(const job_status_t *s)
                  "%s", hint);
     }
 
-    /* Completed-step markers */
-    bool done[N_BTNS] = {
-        s->linked,
-        s->have_dump,
-        s->flashable,
-        s->done && s->ok &&
-        strcmp(s->stage, "Flash verified") == 0,
-    };
-
-    for (int i = 0; i < N_BTNS; i++) {
-        if (done[i] != s_done[i]) {
-            s_done[i] = done[i];
-
-            draw_button(i,
-                        i == s_sel ? BS_SELECTED : BS_NORMAL);
-        }
-    }
 }
 
 /* ---- push buttons ---- */
