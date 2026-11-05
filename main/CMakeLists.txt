@@ -17,6 +17,7 @@ idf_component_register(
         "xenon_keys.c"
         "xecrypt_bl.c"
         "smc.c"
+        "patches.c"
         "build_image.c"
         "rgb.c"
         "kuart.c"
