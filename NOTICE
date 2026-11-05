@@ -31,3 +31,7 @@ an SD card.
 
 This tool is for working on a console you own. It installs no Microsoft code it
 is not given by the user.
+
+  * USB: main/usbpf.c speaks the balika011/PicoFlasher USB protocol (GPL-2.0)
+    so J-Runner can drive this board. components/esp_tinyusb is vendored from
+    espressif/esp-usb (Apache-2.0) with TinyUSB (MIT) from espressif/tinyusb.

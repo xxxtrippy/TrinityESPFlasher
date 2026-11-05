@@ -29,6 +29,10 @@ void jobs_init(void);
 /* Returns false if the worker is busy with another job. */
 bool jobs_start(job_t job);
 
+/* Exclusive console access for the USB/J-Runner link. */
+bool jobs_usb_claim(void);
+void jobs_usb_release(void);
+
 /* Snapshot current status. */
 void jobs_get(job_status_t *out);
 

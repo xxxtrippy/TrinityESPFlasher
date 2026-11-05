@@ -9,6 +9,7 @@
  * key for Build is read from /sd/cpukey.txt.
  */
 #include "kuart.h"
+#include "usbpf.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -52,6 +53,7 @@ void app_main(void)
 
     xbox_init();
     kuart_start();
+    usbpf_start();
     jobs_init();
     ui_start();
 

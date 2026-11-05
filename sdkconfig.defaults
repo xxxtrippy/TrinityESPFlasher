@@ -23,3 +23,10 @@ CONFIG_HTTPD_MAX_URI_LEN=1024
 
 # Larger main task stack for the build/flash worker paths
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Native USB (GPIO19/20) as a PicoFlasher-compatible CDC device for J-Runner.
+# Console stays on UART0 (the COM port you flash through).
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_COUNT=1
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=1024
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=2048

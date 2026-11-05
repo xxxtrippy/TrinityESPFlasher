@@ -18,6 +18,7 @@ idf_component_register(
         "build_image.c"
         "rgb.c"
         "kuart.c"
+        "usbpf.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -32,4 +33,5 @@ idf_component_register(
         esp_timer
         esp_driver_rmt
         esp_driver_uart
+        esp_tinyusb
 )

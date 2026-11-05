@@ -525,6 +525,39 @@ bool jobs_start(job_t job)
     return ok;
 }
 
+/* J-Runner over USB borrows the console the same way a job does: while it
+ * holds the claim, the touch/web UI see "busy" and can't touch the SMC/NAND. */
+static bool usb_claimed;
+
+bool jobs_usb_claim(void)
+{
+    bool ok = false;
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    if (usb_claimed) {
+        ok = true;
+    } else if (!S.busy) {
+        S.busy = true;
+        S.job = JOB_NONE;
+        S.done = false;
+        S.percent = 0;
+        strcpy(S.stage, "J-Runner (USB)");
+        usb_claimed = ok = true;
+    }
+    xSemaphoreGive(S.lock);
+    return ok;
+}
+
+void jobs_usb_release(void)
+{
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    if (usb_claimed) {
+        usb_claimed = false;
+        S.busy = false;
+        strcpy(S.stage, "idle");
+    }
+    xSemaphoreGive(S.lock);
+}
+
 void jobs_get(job_status_t *out)
 {
     xSemaphoreTake(S.lock, portMAX_DELAY);
