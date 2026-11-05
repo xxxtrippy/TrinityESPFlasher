@@ -80,7 +80,27 @@ static const btn_t s_btns[N_BTNS] = {
 
 static int s_sel = 0;
 static bool s_done[N_BTNS];
-static bool s_console_ready = false;
+static bool s_console_ready = false;   /* FND succeeded (console linked)  */
+static bool s_have_dump = false;       /* a verified dump is on the card  */
+static bool s_flashable = false;       /* a verified image is ready       */
+
+/*
+ * Progressive unlock: each step opens only once the previous one is complete.
+ *   FND  : always available
+ *   DMP  : after FND detects a console
+ *   BLD  : after a verified dump exists
+ *   FLSH : after a verified image is built
+ */
+static bool btn_enabled(int i)
+{
+    switch (i) {
+        case 0: return true;
+        case 1: return s_console_ready;
+        case 2: return s_console_ready && s_have_dump;
+        case 3: return s_console_ready && s_flashable;
+    }
+    return false;
+}
 
 /* ---- small drawing helpers ---- */
 
@@ -150,7 +170,7 @@ static void draw_button(int i, btn_state_t state)
 {
     const btn_t *b = &s_btns[i];
 
-    bool disabled = (i != 0 && !s_console_ready);
+    bool disabled = !btn_enabled(i);
 
     uint16_t fill = disabled ? RGB565(0x18, 0x20, 0x1A)
                   : (state == BS_PRESSED) ? COL_OK
@@ -174,8 +194,8 @@ static void draw_button(int i, btn_state_t state)
     text_c(b->x, b->w, BTN_Y + 20,
            b->label, label_col, fill, 2);
 
-    /* completed-step marker */
-    if (s_done[i]) {
+    /* completed-step marker — never shown on DMP */
+    if (s_done[i] && i != 1) {
         rrect(b->x + b->w - 15, BTN_Y + 6, 8, 8, COL_OK);
     }
 }
@@ -299,9 +319,27 @@ static void draw_static(void)
 
 static void draw_status(const job_status_t *s)
 {
-    if (s->linked != s_console_ready) {
+    if (s->linked != s_console_ready ||
+        s->have_dump != s_have_dump ||
+        s->flashable != s_flashable) {
+
+        /* Auto-advance the highlight to each newly unlocked step. */
+        if (s->linked && !s_console_ready) {
+            s_sel = 1;                                   /* FND done -> DMP  */
+        } else if (s->linked && s->have_dump && !s_have_dump) {
+            s_sel = 2;                                   /* DMP done -> BLD  */
+        } else if (s->linked && s->flashable && !s_flashable) {
+            s_sel = 3;                                   /* BLD done -> FLSH */
+        }
+
         s_console_ready = s->linked;
+        s_have_dump = s->have_dump;
+        s_flashable = s->flashable;
+
+        if (!btn_enabled(s_sel)) s_sel = 0;  /* never sit on a locked step */
+
         draw_all_buttons();
+        draw_desc();
     }
 
     uint16_t col = s->done
@@ -471,27 +509,30 @@ static bool pushed(pushbtn_t *b)
 
 static void move_right(void)
 {
-    if (!s_console_ready) {
-        /* Until FND succeeds, DMP/BLD/FLSH are unavailable. */
-        s_sel = 0;
-        draw_button(0, BS_SELECTED);
-        draw_desc();
-        return;
-    }
-
     int old = s_sel;
-    s_sel = (s_sel + 1) % N_BTNS;
 
-    draw_button(old, BS_NORMAL);
-    draw_button(s_sel, BS_SELECTED);
-
-    draw_desc();
+    /* Advance to the next unlocked step, wrapping; skip locked ones. */
+    for (int k = 1; k <= N_BTNS; k++) {
+        int cand = (s_sel + k) % N_BTNS;
+        if (btn_enabled(cand)) {
+            if (cand != s_sel) {
+                s_sel = cand;
+                draw_button(old, BS_NORMAL);
+                draw_button(s_sel, BS_SELECTED);
+                draw_desc();
+            }
+            return;
+        }
+    }
+    /* nothing else unlocked yet: stay put */
 }
 
 /* ---- execute selected action ---- */
 
 static void run_selected(void)
 {
+    if (!btn_enabled(s_sel)) return;      /* locked step: ignore */
+
     const btn_t *b = &s_btns[s_sel];
 
     draw_button(s_sel, BS_PRESSED);
