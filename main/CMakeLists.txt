@@ -16,6 +16,7 @@ idf_component_register(
         "nand_ecc.c"
         "xenon_keys.c"
         "xecrypt_bl.c"
+        "smc.c"
         "build_image.c"
         "rgb.c"
         "kuart.c"
