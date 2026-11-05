@@ -18,7 +18,9 @@ src/spiex.c and src/xbox.c are ported from:
       - Hax360       — project overhaul
       - ExposureMG   — ESP32 port
 
-  * balika011/PicoFlasher       — the canonical RP2040 flasher
+  * balika011/PicoFlasher       — the canonical RP2040 flasher (GPL-2.0)
+  * hax360/PicoFlasher (codeberg.org/hax360/PicoFlasher, GPL-2.0)
+      - Mate Kukri — discard one SPI read after stopping the SMC (eMMC fix)
 
 The image-build pipeline (src/build_image.c, src/nand_ecc.c, src/xenon_keys.c)
 reimplements, for on-device use, the flashing/build workflow that J-Runner

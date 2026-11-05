@@ -76,6 +76,10 @@ void xbox_stop_smc(void)
 	gpio_set_level(SPI_SS_N, 1);
 	sleep_ms(50);
 
+	/* On eMMC consoles a CLK edge before SPI debug mode is entered corrupts
+	 * the next transfer; discard one read (hax360/PicoFlasher 26cd270). */
+	(void)spiex_read_reg(0);
+
 	xbox_smc_stopped = true;
 }
 
