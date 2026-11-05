@@ -15,6 +15,7 @@ idf_component_register(
         "xbox.c"
         "nand_ecc.c"
         "xenon_keys.c"
+        "xecrypt_bl.c"
         "build_image.c"
         "rgb.c"
         "kuart.c"
