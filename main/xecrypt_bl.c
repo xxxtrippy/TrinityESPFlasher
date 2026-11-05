@@ -83,3 +83,13 @@ void xc_cf_decrypt(uint8_t*cf,size_t len,const uint8_t k1[16]){
 void xc_cg_decrypt(uint8_t*cg,size_t len,const uint8_t*cf_dec){
     uint8_t h[20];xc_hmac_sha1(cf_dec+0x330,0x10,cg+0x10,0x10,h);xc_rc4(h,16,cg+0x20,len-0x20);memcpy(cg+0x10,h,0x10);
 }
+
+/* Build the CB_B RC4 key exactly as the encrypt path does, then RC4 (RC4 is its
+ * own inverse), so decrypt == encrypt with the same derived key. */
+void xc_cbb_decrypt_cpukey(uint8_t*cbb,size_t len,const uint8_t cba_key[16],bool nc,const uint8_t cpukey[16]){
+    xc_cbb_encrypt_cpukey(cbb,len,cba_key,nc,cpukey);
+}
+void xc_cd_decrypt(uint8_t*cd,size_t len,const uint8_t cbb_key[16]){
+    uint8_t nonce[16];memcpy(nonce,cd+0x10,16);
+    xc_cd_encrypt(cd,len,nonce,cbb_key);  /* same derived key; RC4 self-inverse */
+}

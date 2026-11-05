@@ -29,3 +29,9 @@ void xc_cf_decrypt(uint8_t *cf, size_t len, const uint8_t key1bl[16]);
 void xc_cg_decrypt(uint8_t *cg, size_t len, const uint8_t *cf_decrypted);
 
 #endif
+
+/* Decrypt CB_B (needs the CB_A key + console CPU key) and CD (needs CB_B key),
+ * the inverses of the encrypt functions, for rebuilding from a retail dump. */
+void xc_cbb_decrypt_cpukey(uint8_t *cbb, size_t len, const uint8_t cba_key[16],
+                           bool new_crypto, const uint8_t cpukey[16]);
+void xc_cd_decrypt(uint8_t *cd, size_t len, const uint8_t cbb_key[16]);
