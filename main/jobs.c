@@ -26,6 +26,8 @@
 #include "sdcard.h"
 #include "build_image.h"
 #include "rgb.h"
+#include "nand_ecc.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "jobs";
 
@@ -328,6 +330,156 @@ static bool verify_flash(uint32_t pages)
     return ok;
 }
 
+/* ---------------- Write XeLL (RGH3) ----------------
+ * Same steps as J-Runner's "Write XeLL" with RGH3 ticked:
+ *   1. start from J-Runner's prebuilt TRINITY_RGH3.ecc (RGH3 CB_A/CB_X + SMC)
+ *   2. drop in this console's own raw keyvault pages from the dump
+ *   3. optionally swap in a newer xell-gggggg.bin and re-ECC those pages
+ *   4. write the 80 blocks at the start of the NAND, then read back + compare
+ * Nothing past the ECC image is touched, and no CPU key is needed. */
+#define XELL_ECC_RAW   1351680u        /* 2560 pages x 0x210          */
+#define XELL_ECC_PLAIN 1310720u        /* same image without spare     */
+#define XELL_PAGES     (XELL_ECC_RAW / NAND_PAGE_RAW)
+#define XELL_BIN_SIZE  0x40000u
+#define KV_RAW_OFF     0x4200u
+#define KV_RAW_LEN     0x4200u
+#define XELL_OUT_FILE  SD_MOUNT_POINT "/XELL.ECC"
+
+static const uint8_t XELL_SIG[16] = {
+    0x48,0x00,0x00,0x20,0x48,0x00,0x00,0xEC,0x48,0x00,0x00,0x00,0x48,0x00,0x00,0x00 };
+
+static size_t read_whole(const char *path, uint8_t *dst, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(dst, 1, cap, f);
+    if (fgetc(f) != EOF) n = cap + 1;     /* larger than expected */
+    fclose(f);
+    return n;
+}
+
+static void job_xell(void)
+{
+    static const char *ecc_paths[] = {
+        SD_MOUNT_POINT "/xell/TRINITY_RGH3.ecc",
+        SD_MOUNT_POINT "/TRINITY_RGH3.ecc",
+        SD_MOUNT_POINT "/common/xell-images/glitch2/TRINITY_RGH3.ecc",
+    };
+    static const char *xell_paths[] = {
+        XEBUILD_DATA_ROOT "/xell-gggggg.bin",
+        SD_MOUNT_POINT "/xell/xell-gggggg.bin",
+    };
+
+    if (!S.linked || !xbox_smc_stopped) { st(0, "Detect first", true, false); return; }
+    if (!S.have_dump) { st(0, "Dump first", true, false); return; }
+
+    st(1, "Checking backup", false, false);
+    if (!backup_ok()) { st(0, "Backup mismatch", true, false); return; }
+
+    uint8_t *img  = heap_caps_malloc(XELL_ECC_RAW + 1, MALLOC_CAP_SPIRAM);
+    uint8_t *xell = heap_caps_malloc(XELL_BIN_SIZE + 1, MALLOC_CAP_SPIRAM);
+    if (!img || !xell) { free(img); free(xell); st(0, "Out of memory", true, false); return; }
+
+    /* 1. template */
+    st(3, "Loading RGH3 ECC", false, false);
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(ecc_paths) / sizeof(ecc_paths[0]) && !n; i++)
+        n = read_whole(ecc_paths[i], img, XELL_ECC_RAW);
+    if (n == XELL_ECC_PLAIN) {
+        /* no-spare variant: spread to raw pages, spare is rebuilt below */
+        for (int p = (int)XELL_PAGES - 1; p >= 0; p--) {
+            memmove(img + (size_t)p * NAND_PAGE_RAW, img + (size_t)p * NAND_PAGE_DATA, NAND_PAGE_DATA);
+            nand_ecc_make_spare(img + (size_t)p * NAND_PAGE_RAW, (uint32_t)p,
+                                img + (size_t)p * NAND_PAGE_RAW + NAND_PAGE_DATA);
+        }
+    } else if (n != XELL_ECC_RAW) {
+        free(img); free(xell);
+        st(0, n ? "Bad RGH3 ECC size" : "Need TRINITY_RGH3", true, false);
+        return;
+    }
+    if (img[0] != 0xFF || img[1] != 0x4F) {
+        free(img); free(xell); st(0, "Bad RGH3 ECC", true, false); return;
+    }
+
+    /* 2. this console's keyvault (raw pages incl. spare, as J-Runner does) */
+    st(6, "Injecting keyvault", false, false);
+    FILE *d = fopen(DUMP_FILE, "rb");
+    uint8_t kvspare[NAND_PAGE_SPARE];
+    bool kv_ok = d && fseek(d, KV_RAW_OFF, SEEK_SET) == 0 &&
+                 fread(img + KV_RAW_OFF, 1, KV_RAW_LEN, d) == KV_RAW_LEN;
+    if (d) fclose(d);
+    memcpy(kvspare, img + KV_RAW_OFF + NAND_PAGE_DATA, NAND_PAGE_SPARE);
+    if (!kv_ok) { free(img); free(xell); st(0, "Dump read error", true, false); return; }
+    /* spare layout of the dump must match the template's (Trinity: 00 .. FF) */
+    {
+        const uint8_t *tsp = img + 0x8400 + NAND_PAGE_DATA;   /* page after KV */
+        if (kvspare[5] != tsp[5] || (kvspare[0] == 0xFF) != (tsp[0] == 0xFF)) {
+            free(img); free(xell); st(0, "NAND layout mismatch", true, false); return;
+        }
+    }
+
+    /* 3. optional newer XeLL */
+    size_t xn = 0;
+    for (size_t i = 0; i < sizeof(xell_paths) / sizeof(xell_paths[0]) && !xn; i++)
+        xn = read_whole(xell_paths[i], xell, XELL_BIN_SIZE);
+    if (xn == XELL_BIN_SIZE && memcmp(xell, XELL_SIG, 16) == 0) {
+        static const uint32_t offs[] = { 0x70000, 0xC0000, 0x100000, 0xE0000 };
+        int injected = 0;
+        for (size_t i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
+            uint32_t pg0 = offs[i] / NAND_PAGE_DATA;
+            if (pg0 + XELL_BIN_SIZE / NAND_PAGE_DATA > XELL_PAGES) continue;
+            uint8_t *base = img + (size_t)pg0 * NAND_PAGE_RAW;
+            if (memcmp(base, XELL_SIG, 16) != 0) continue;
+            for (uint32_t k = 0; k < XELL_BIN_SIZE / NAND_PAGE_DATA; k++) {
+                uint8_t *pg = base + (size_t)k * NAND_PAGE_RAW;
+                memcpy(pg, xell + (size_t)k * NAND_PAGE_DATA, NAND_PAGE_DATA);
+                nand_ecc_fix_page(pg);
+            }
+            injected++;
+        }
+        ESP_LOGI(TAG, "XeLL injected into %d slot(s)", injected);
+    } else {
+        ESP_LOGI(TAG, "no xell-gggggg.bin, keeping the ECC's own XeLL");
+    }
+    free(xell);
+
+    /* final self-check: every page's ECC must be consistent */
+    for (uint32_t p = 0; p < XELL_PAGES; p++) {
+        uint8_t *pg = img + (size_t)p * NAND_PAGE_RAW;
+        uint32_t e = nand_ecc_calc(pg);
+        uint32_t have = (uint32_t)pg[0x20C] | ((uint32_t)pg[0x20D] << 8) |
+                        ((uint32_t)pg[0x20E] << 16) | ((uint32_t)pg[0x20F] << 24);
+        if ((e & ~0x3Fu) != (have & ~0x3Fu)) {
+            ESP_LOGE(TAG, "ECC mismatch on page %lu", (unsigned long)p);
+            free(img); st(0, "ECC check failed", true, false); return;
+        }
+    }
+
+    FILE *o = fopen(XELL_OUT_FILE, "wb");
+    if (o) { fwrite(img, 1, XELL_ECC_RAW, o); fclose(o); }
+
+    /* 4. write + verify */
+    for (uint32_t p = 0; p < XELL_PAGES; p++) {
+        uint8_t *pg = img + (size_t)p * NAND_PAGE_RAW;
+        if (xbox_nand_write_block(p, pg, pg + NAND_PAGE_DATA) != 0) {
+            free(img); st(0, "Write error", true, false); return;
+        }
+        if ((p & 0x7F) == 0) st(10 + (int)(p * 60 / XELL_PAGES), "Writing XeLL", false, false);
+    }
+    rgb_verifying();
+    uint8_t got[NAND_PAGE_RAW];
+    for (uint32_t p = 0; p < XELL_PAGES; p++) {
+        if (xbox_nand_read_block(p, got, got + NAND_PAGE_DATA) != 0 ||
+            memcmp(got, img + (size_t)p * NAND_PAGE_RAW, NAND_PAGE_RAW) != 0) {
+            ESP_LOGE(TAG, "XeLL verify mismatch at page %lu", (unsigned long)p);
+            free(img); st(0, "Verify failed", true, false); return;
+        }
+        if ((p & 0x7F) == 0) st(70 + (int)(p * 30 / XELL_PAGES), "Verifying XeLL", false, false);
+    }
+    free(img);
+    st(100, "XeLL written - boot it", true, true);
+}
+
 static void job_flash(void)
 {
     uint32_t pages = trinity_pages();
@@ -472,6 +624,11 @@ static void worker_task(void *arg)
             case JOB_FLASH:
                 rgb_flashing();
                 job_flash();
+                break;
+
+            case JOB_XELL:
+                rgb_flashing();
+                job_xell();
                 break;
 
             default:

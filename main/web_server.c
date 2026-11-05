@@ -103,6 +103,18 @@ static esp_err_t h_flash(httpd_req_t *r)
                                  : resp_busy(r);
 }
 
+static esp_err_t h_xell(httpd_req_t *r)
+{
+    job_status_t s;
+    jobs_get(&s);
+    if (!s.have_dump) {
+        httpd_resp_set_status(r, "409 Conflict");
+        return httpd_resp_sendstr(r, "{\"error\":\"dump first\"}");
+    }
+    return jobs_start(JOB_XELL) ? httpd_resp_sendstr(r, "{\"started\":true}")
+                                : resp_busy(r);
+}
+
 static esp_err_t h_progress(httpd_req_t *r)
 {
     httpd_resp_set_type(r, "text/event-stream");
@@ -372,7 +384,7 @@ static void reg(httpd_handle_t s, const char *uri, httpd_method_t m,
 void web_server_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 24;
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
     cfg.send_wait_timeout = 15;   /* big download over WiFi */
@@ -388,6 +400,7 @@ void web_server_start(void)
     reg(srv, "/api/dump",     HTTP_POST, h_dump);
     reg(srv, "/api/build",    HTTP_POST, h_build);
     reg(srv, "/api/flash",    HTTP_POST, h_flash);
+    reg(srv, "/api/xell",     HTTP_POST, h_xell);
     reg(srv, "/api/progress", HTTP_GET,  h_progress);
     reg(srv, "/api/uart",     HTTP_GET,  h_uart);
     reg(srv, "/dump.bin",     HTTP_GET,  h_dump_bin);

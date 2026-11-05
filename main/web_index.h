@@ -42,14 +42,18 @@ static const char INDEX_HTML[] =
 "<button onclick=dump()>Dump &amp; verify</button>"
 "<a id=dl style=display:none><button class=sec>Download dump.bin</button></a></div>"
 
-"<div class=card><h2>2 · Build RGH image</h2>"
+"<div class=card><h2>2 · Write XeLL (RGH3)</h2>"
+"<div class=row>Writes RGH3 XeLL with your own keyvault so you can read the CPU key. Needs TRINITY_RGH3.ecc on the SD card (in /xell). Only the first 80 blocks are written.</div>"
+"<button onclick=xell()>Write XeLL</button></div>"
+
+"<div class=card><h2>3 · Build RGH image</h2>"
 "<div class=row>Needs the xeBuild data package on the SD card and your CPU key.</div>"
 "<div class=kv><span>SD package</span><b id=sd>—</b></div>"
 "<input id=cpukey placeholder='CPU key (32 hex chars)' maxlength=32 autocomplete=off>"
 "<button onclick=build()>Build image</button>"
 "<div class=note id=buildnote></div></div>"
 
-"<div class=card><h2>3 · Flash</h2>"
+"<div class=card><h2>4 · Flash</h2>"
 "<div class=row>Writes the built (or uploaded) image back and verifies.</div>"
 "<button id=flashbtn onclick=flash() disabled>Flash image</button></div>"
 
@@ -96,6 +100,8 @@ static const char INDEX_HTML[] =
 "const r=await j('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify({cpu_key:k})});"
 "if(r.status&&r.status!=='ok'){$('#buildnote').textContent=r.message||r.status}}"
+"async function xell(){if(!confirm('Write RGH3 XeLL to the console NAND? Your dump stays on the SD card.'))return;watch();"
+"const r=await fetch('/api/xell',{method:'POST'});if(!r.ok)prog(0,'busy or no dump','err')}"
 "async function flash(){if(!confirm('Write image to the console NAND?'))return;watch();"
 "await fetch('/api/flash',{method:'POST'})}"
 /* ---- SD file manager ---- */

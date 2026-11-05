@@ -8,7 +8,7 @@
  *   header bar with a console-link dot
  *   status card: stage, console info, progress bar, percent, hint
  *   description of the highlighted action
- *   4 buttons: FND | DMP | BLD | FLSH, each with a "done" marker
+ *   5 buttons: FND | DMP | XEL | BLD | FLSH, each with a "done" marker
  *   control hint
  *
  * Controls:
@@ -60,7 +60,7 @@
 #define BTN_Y 160
 #define BTN_H 60
 
-#define N_BTNS 4
+#define N_BTNS 5
 
 typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED, BS_DISABLED } btn_state_t;
 
@@ -72,10 +72,11 @@ typedef struct {
 } btn_t;
 
 static const btn_t s_btns[N_BTNS] = {
-    { 6,   74, "FND",  "FND: find console",        JOB_NONE  },
-    { 84,  74, "DMP",  "DMP: dump NAND (2 reads)", JOB_DUMP  },
-    { 162, 74, "BLD",  "BLD: build image",         JOB_BUILD },
-    { 240, 74, "FLSH", "FLSH: flash + verify",     JOB_FLASH },
+    { 4,   58, "FND",  "FND: find console",          JOB_NONE  },
+    { 64,  58, "DMP",  "DMP: dump NAND (2 reads)",   JOB_DUMP  },
+    { 124, 58, "XEL",  "XEL: write RGH3 XeLL",       JOB_XELL  },
+    { 184, 58, "BLD",  "BLD: build image",           JOB_BUILD },
+    { 244, 72, "FLSH", "FLSH: flash + verify",       JOB_FLASH },
 };
 
 static int s_sel = 0;
@@ -96,7 +97,8 @@ static bool btn_enabled(int i)
         case 0: return true;
         case 1: return s_console_ready;
         case 2: return s_console_ready && s_have_dump;
-        case 3: return s_console_ready && s_flashable;
+        case 3: return s_console_ready && s_have_dump;
+        case 4: return s_console_ready && s_flashable;
     }
     return false;
 }
@@ -319,9 +321,9 @@ static void draw_status(const job_status_t *s)
         if (s->linked && !s_console_ready) {
             s_sel = 1;                                   /* FND done -> DMP  */
         } else if (s->linked && s->have_dump && !s_have_dump) {
-            s_sel = 2;                                   /* DMP done -> BLD  */
+            s_sel = 2;                                   /* DMP done -> XEL  */
         } else if (s->linked && s->flashable && !s_flashable) {
-            s_sel = 3;                                   /* BLD done -> FLSH */
+            s_sel = 4;                                   /* BLD done -> FLSH */
         }
 
         s_console_ready = s->linked;
@@ -414,7 +416,7 @@ static void draw_status(const job_status_t *s)
     const char *hint = s->flashable
                      ? "image ready - select FLSH"
                      : (s->have_dump
-                        ? "dump saved - select BLD"
+                        ? "dump saved - XEL, then BLD"
                         : "select FND, then DMP");
 
     if (strcmp(hint, s_last_hint) != 0) {

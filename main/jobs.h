@@ -10,7 +10,7 @@
  * by the web server; the standalone build drives it from the screen.)
  */
 
-typedef enum { JOB_NONE, JOB_DUMP, JOB_BUILD, JOB_FLASH } job_t;
+typedef enum { JOB_NONE, JOB_DUMP, JOB_BUILD, JOB_FLASH, JOB_XELL } job_t;
 
 typedef struct {
     bool  busy;
