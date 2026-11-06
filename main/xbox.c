@@ -52,6 +52,11 @@ bool xbox_smc_stopped = false;
 
 void xbox_start_smc(void)
 {
+	/* Release the SPI bus first (PicoFlasher does this) so the ESP stops
+	 * driving CLK/MOSI before the SMC takes the bus back — otherwise the two
+	 * contend and the console can't boot after a flash. */
+	spiex_deinit();
+
 	gpio_set_level(SMC_DBG_EN, 0);
 	gpio_set_level(SMC_RST_XDK_N, 0);
 
@@ -128,7 +133,7 @@ static int xbox_nand_wait_ready(uint16_t timeout)
 int xbox_nand_read_block(uint32_t lba, uint8_t *buffer, uint8_t *spare)
 {
 	if (!xbox_smc_stopped || !xbox_cached_flash_config) {
-		return 0;
+		return 0x8000;  /* not ready: fail loudly instead of returning silent zeros */
 	}
 
 	xbox_nand_clear_status();
@@ -166,7 +171,7 @@ int xbox_nand_read_block(uint32_t lba, uint8_t *buffer, uint8_t *spare)
 int xbox_nand_erase_block(uint32_t lba)
 {
 	if (!xbox_smc_stopped || !xbox_cached_flash_config) {
-		return 0;
+		return 0x8000;  /* not ready: fail loudly instead of returning silent zeros */
 	}
 
 	xbox_nand_clear_status();
@@ -189,7 +194,7 @@ int xbox_nand_erase_block(uint32_t lba)
 int xbox_nand_write_block(uint32_t lba, uint8_t *buffer, uint8_t *spare)
 {
 	if (!xbox_smc_stopped || !xbox_cached_flash_config) {
-		return 0;
+		return 0x8000;  /* not ready: fail loudly instead of returning silent zeros */
 	}
 
 	int major = (xbox_cached_flash_config >> 17) & 3;
