@@ -103,7 +103,7 @@ static void wr(const void *p, uint32_t n)
         uint32_t k = tud_cdc_write(b, n);
         b += k; n -= k;
         if (n) { tud_cdc_write_flush(); vTaskDelay(1); }
-        if (!tud_cdc_connected()) return;
+        if (!tud_mounted()) return;
     }
 }
 
@@ -114,7 +114,7 @@ static void usbpf_task(void *arg)
     uint32_t have = 0, s_off = 0, s_end = 0;
 
     for (;;) {
-        if (!tud_cdc_connected()) {
+        if (!tud_mounted()) {
             have = 0;
             release();
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -157,7 +157,7 @@ static void usbpf_task(void *arg)
         }
 
         switch (cmd) {
-        case GET_VERSION: { uint32_t v = 3; wr(&v, 4); break; }
+        case GET_VERSION: { uint32_t v = 2; wr(&v, 4); break; } /* 2 = SPI-only, SMC fallback */
         case GET_FLASH_CONFIG: { uint32_t fc = xbox_get_flash_config(); wr(&fc, 4); break; }
         case READ_FLASH: {
             uint32_t ret = xbox_nand_read_block(lba, &pg[4], &pg[4 + 0x200]);
