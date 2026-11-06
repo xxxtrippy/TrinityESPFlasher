@@ -23,6 +23,7 @@ idf_component_register(
         "rgb.c"
         "kuart.c"
         "usbpf.c"
+        "xellnet.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -38,4 +39,6 @@ idf_component_register(
         esp_driver_rmt
         esp_driver_uart
         esp_tinyusb
+        esp_http_client
+        esp_netif
 )

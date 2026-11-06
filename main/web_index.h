@@ -60,6 +60,9 @@ static const char INDEX_HTML[] =
 "<div class=card><h2>Progress</h2>"
 "<div id=bar><div id=fill></div></div><div id=stage>idle</div></div>"
 
+"<div class=card><h2>CPU key from XeLL (WiFi)</h2>"
+"<div class=row>Boot the console into XeLL on the same network, then grab its CPU key automatically \u2014 no serial wiring.</div>"
+"<button onclick=xkey()>Find XeLL &amp; grab key</button> <b id=xk></b></div>"
 "<div class=card><h2>Kernel debug UART</h2>"
 "<div class=kv><span>CPU key</span><b id=ukey>—</b></div>"
 "<pre id=ulog style=\"max-height:240px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:6px 0 0\"></pre></div>"
@@ -76,6 +79,8 @@ static const char INDEX_HTML[] =
 "<div class=sub style=margin-top:4px>Open source · GPL-3.0 · for your own console</div>"
 "</div><script>"
 "const $=s=>document.querySelector(s);"
+"async function xkey(){$('#xk').textContent='scanning...';try{const r=await fetch('/api/xellkey',{method:'POST'});"
+"const j=await r.json();$('#xk').textContent=j.cpukey?('key: '+j.cpukey):(j.error||'not found')}catch(e){$('#xk').textContent='error'}}"
 "async function ul(){try{const r=await fetch('/api/uart');const k=r.headers.get('X-Cpu-Key');"
 "$('#ukey').textContent=k||'not seen yet';const e=$('#ulog'),b=e.scrollTop+e.clientHeight>=e.scrollHeight-4;"
 "e.textContent=await r.text();if(b)e.scrollTop=e.scrollHeight}catch(e){}}setInterval(ul,1500);"

@@ -14,6 +14,7 @@
  *   GET  /dump.bin      download the last verified dump (NANDDUMP.BIN)
  */
 #include "kuart.h"
+#include "xellnet.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +102,18 @@ static esp_err_t h_flash(httpd_req_t *r)
 {
     return jobs_start(JOB_FLASH) ? httpd_resp_sendstr(r, "{\"started\":true}")
                                  : resp_busy(r);
+}
+
+static esp_err_t h_xellkey(httpd_req_t *r)
+{
+    char key[33];
+    if (xellnet_fetch(key)) {
+        char j[64];
+        snprintf(j, sizeof(j), "{\"cpukey\":\"%s\"}", key);
+        return httpd_resp_sendstr(r, j);
+    }
+    httpd_resp_set_status(r, "404 Not Found");
+    return httpd_resp_sendstr(r, "{\"error\":\"XeLL not found on the network\"}");
 }
 
 static esp_err_t h_xell(httpd_req_t *r)
@@ -401,6 +414,7 @@ void web_server_start(void)
     reg(srv, "/api/build",    HTTP_POST, h_build);
     reg(srv, "/api/flash",    HTTP_POST, h_flash);
     reg(srv, "/api/xell",     HTTP_POST, h_xell);
+    reg(srv, "/api/xellkey",  HTTP_POST, h_xellkey);
     reg(srv, "/api/progress", HTTP_GET,  h_progress);
     reg(srv, "/api/uart",     HTTP_GET,  h_uart);
     reg(srv, "/dump.bin",     HTTP_GET,  h_dump_bin);
