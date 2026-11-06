@@ -67,7 +67,7 @@ static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
     }
 }
 
-__attribute__((unused)) static void rgb_animation_task(void *arg)
+static void rgb_animation_task(void *arg)
 {
     rgb_state_t previous = (rgb_state_t)-1;
     bool pulse_on = true;

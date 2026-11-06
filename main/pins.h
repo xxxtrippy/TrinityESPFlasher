@@ -81,6 +81,6 @@
  *   SELECT : runs the highlighted action
  */
 #define PIN_BTN_RIGHT  47
-#define PIN_BTN_SELECT 48
+#define PIN_BTN_SELECT 38
 
 #endif
