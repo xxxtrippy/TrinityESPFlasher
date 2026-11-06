@@ -26,7 +26,11 @@ static bool pfc_spi_inited;
 #endif
 
 #ifndef PFC_SPI_CLOCK_HZ
-#define PFC_SPI_CLOCK_HZ (20 * 1000 * 1000)
+/* Foolproof bring-up: 4 MHz for maximum signal-integrity margin over dupont
+ * jumpers. Dump time is per-transaction-overhead bound, not clock bound, so
+ * the slow clock costs little. PicoFlasher runs 28 MHz; raise once reads are
+ * proven reliable. */
+#define PFC_SPI_CLOCK_HZ (4 * 1000 * 1000)
 #endif
 
 static const uint8_t lsb2msb[] = {
