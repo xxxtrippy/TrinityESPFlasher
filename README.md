@@ -67,15 +67,15 @@ These are the same points the RP2040 PicoFlasher uses.
 
 Wire in this order (GPIO10 → 21, then GND last):
 
-| ESP32-S3 GPIO | J2C1 signal | Notes |
-|---|---|---|
-| GPIO10 | SPI_SS_N | chip select |
-| GPIO11 | SPI_MOSI | ESP to SB data |
-| GPIO12 | SPI_CLK | clock |
-| GPIO13 | SPI_MISO | SB to ESP data |
-| GPIO14 | SMC_DBG_EN | SMC debug enable |
-| GPIO21 | SMC_RST_XDK_N | SMC reset |
-| GND | GND | **required — connect last** |
+| ESP32-S3 GPIO | J2C1 signal | Wire color | Notes |
+|---|---|---|---|
+| GPIO10 | SPI_SS_N | 🟤 Brown | chip select |
+| GPIO11 | SPI_MOSI | 🔴 Red | ESP to SB data |
+| GPIO12 | SPI_CLK | 🟠 Orange | clock |
+| GPIO13 | SPI_MISO | 🟡 Yellow | SB to ESP data |
+| GPIO14 | SMC_DBG_EN | 🟢 Green | SMC debug enable |
+| GPIO21 | SMC_RST_XDK_N | 🔵 Blue | SMC reset |
+| GND | GND | 🟣 Purple | **required — connect last** |
 
 ### microSD card (SPI3)
 
