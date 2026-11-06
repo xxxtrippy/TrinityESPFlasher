@@ -19,6 +19,7 @@
 #include "pins.h"
 
 static spi_device_handle_t pfc_spi_dev;
+static bool pfc_spi_inited;
 
 #ifndef PFC_SPI_HOST
 #define PFC_SPI_HOST SPI2_HOST
@@ -49,6 +50,12 @@ static const uint8_t lsb2msb[] = {
 
 void spiex_init(void)
 {
+	/* Idempotent: PicoFlasher re-inits SPI on every xbox_stop_smc(); ESP-IDF's
+	 * spi_bus_initialize is not re-entrant, so tear down a prior bus first. */
+	if (pfc_spi_inited) {
+		spiex_deinit();
+	}
+
 	gpio_config_t cs_cfg = {
 		.intr_type = GPIO_INTR_DISABLE,
 		.mode = GPIO_MODE_OUTPUT,
@@ -78,15 +85,24 @@ void spiex_init(void)
 	};
 
 	ESP_ERROR_CHECK(spi_bus_add_device(PFC_SPI_HOST, &devcfg, &pfc_spi_dev));
+
+	/* Match PicoFlasher: pull MISO up so an undriven line never reads as 0. */
+	gpio_set_pull_mode(SPI_MISO, GPIO_PULLUP_ONLY);
+
+	pfc_spi_inited = true;
 }
 
 void spiex_deinit(void)
 {
+	if (!pfc_spi_inited) {
+		return;
+	}
 	if (pfc_spi_dev) {
 		spi_bus_remove_device(pfc_spi_dev);
 		pfc_spi_dev = NULL;
 	}
 	spi_bus_free(PFC_SPI_HOST);
+	pfc_spi_inited = false;
 }
 
 uint32_t spiex_read_reg(uint8_t reg)

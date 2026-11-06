@@ -31,19 +31,21 @@ static void sleep_ms(int ms)
 
 void xbox_init(void)
 {
-	spiex_init();
-
+	/* Match PicoFlasher: idle SMC lines + SS high, and DON'T bring up SPI here.
+	 * SPI is initialized at the end of xbox_stop_smc(), after the SMC releases
+	 * the bus, so the ESP never drives CLK/MOSI against the running SMC. */
 	gpio_config_t cfg = {
 		.intr_type = GPIO_INTR_DISABLE,
 		.mode = GPIO_MODE_OUTPUT,
-		.pin_bit_mask = (1ULL << SMC_DBG_EN) | (1ULL << SMC_RST_XDK_N),
+		.pin_bit_mask = (1ULL << SMC_DBG_EN) | (1ULL << SMC_RST_XDK_N) | (1ULL << SPI_SS_N),
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
 	};
 	gpio_config(&cfg);
 
-	gpio_set_level(SMC_DBG_EN, 0);
+	gpio_set_level(SMC_DBG_EN, 1);
 	gpio_set_level(SMC_RST_XDK_N, 1);
+	gpio_set_level(SPI_SS_N, 1);
 }
 
 bool xbox_smc_stopped = false;
@@ -75,6 +77,10 @@ void xbox_stop_smc(void)
 
 	gpio_set_level(SPI_SS_N, 1);
 	sleep_ms(50);
+
+	/* Bring SPI up now that the SMC has released the bus (PicoFlasher does
+	 * spiex_init() here, not at boot). Idempotent: re-inits on repeat stops. */
+	spiex_init();
 
 	/* On eMMC consoles a CLK edge before SPI debug mode is entered corrupts
 	 * the next transfer; discard one read (hax360/PicoFlasher 26cd270). */
