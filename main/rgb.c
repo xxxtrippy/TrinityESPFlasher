@@ -6,6 +6,7 @@
  */
 
 #include "rgb.h"
+#include "pins.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -66,7 +67,7 @@ static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
     }
 }
 
-static void rgb_animation_task(void *arg)
+__attribute__((unused)) static void rgb_animation_task(void *arg)
 {
     rgb_state_t previous = (rgb_state_t)-1;
     bool pulse_on = true;
@@ -133,6 +134,14 @@ static void rgb_animation_task(void *arg)
 
 bool rgb_init(void)
 {
+#if RGB_GPIO == PIN_BTN_SELECT
+    /* The onboard WS2812 shares GPIO48 with the SELECT button. The button wins:
+     * driving the LED here would steal the pin and the button would never read.
+     * Status is shown on the LCD instead. All rgb_* calls become no-ops. */
+    ESP_LOGW(TAG, "onboard RGB disabled: GPIO%d is the SELECT button", RGB_GPIO);
+    rgb_ok = false;
+    return false;
+#else
     rmt_tx_channel_config_t chan_cfg = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .gpio_num = RGB_GPIO,
@@ -175,6 +184,7 @@ bool rgb_init(void)
     ESP_LOGI(TAG, "RGB LED initialized on GPIO%d (core RMT)", RGB_GPIO);
     rgb_ready();
     return true;
+#endif
 }
 
 void rgb_ready(void)      { rgb_state = RGB_STATE_READY; }
