@@ -65,15 +65,17 @@ and touch controller share a bit-banged bus instead of sharing the SD bus.
 
 These are the same points the RP2040 PicoFlasher uses.
 
+Wire in this order (GPIO10 → 21, then GND last):
+
 | ESP32-S3 GPIO | J2C1 signal | Notes |
 |---|---|---|
 | GPIO10 | SPI_SS_N | chip select |
+| GPIO11 | SPI_MOSI | ESP to SB data |
 | GPIO12 | SPI_CLK | clock |
 | GPIO13 | SPI_MISO | SB to ESP data |
-| GND | GND | **required** |
-| GPIO21 | SMC_RST_XDK_N | SMC reset |
 | GPIO14 | SMC_DBG_EN | SMC debug enable |
-| GPIO11 | SPI_MOSI | ESP to SB data |
+| GPIO21 | SMC_RST_XDK_N | SMC reset |
+| GND | GND | **required — connect last** |
 
 ### microSD card (SPI3)
 
