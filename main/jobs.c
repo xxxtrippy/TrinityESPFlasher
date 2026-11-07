@@ -248,6 +248,7 @@ static int hex2bin(const char *hex, uint8_t *out, int out_len)
 static void job_build(void)
 {
     uint8_t cpu_key[16];
+    const uint8_t *cpu_key_p = NULL;
 
     if (!S.have_dump) {
         st(0, "Dump first", true, false);
@@ -260,14 +261,16 @@ static void job_build(void)
         return;
     }
 
-    if (hex2bin(S.cpu_key_hex, cpu_key, 16) != 0) {
-        st(0, "Need cpukey.txt", true, false);
-        return;
+    /* The CPU key is NOT required: the RGH3 chain is console-independent and the
+     * KeyVault is copied verbatim from the dump, so no key is needed to build.
+     * Pass it through only if a valid cpukey.txt happens to be present. */
+    if (hex2bin(S.cpu_key_hex, cpu_key, 16) == 0) {
+        cpu_key_p = cpu_key;
     }
 
     S.flashable = false;
     build_progress_t bp = { 0 };
-    build_status_t bs = build_rgh_image(DUMP_FILE, cpu_key,
+    build_status_t bs = build_rgh_image(DUMP_FILE, cpu_key_p,
                                         IMAGE_FILE, &bp);
 
     if (bs == BUILD_OK) {
@@ -556,6 +559,14 @@ static void job_flash(void)
     rgb_verifying();
 
     if (verify_flash(pages)) {
+        /* Release the SMC so the console cold-boots into the freshly-flashed
+         * RGH3 image (DBG_EN was held high since detect, halting the console).
+         * After this, re-detect is needed before any further NAND op. */
+        st(99, "Restarting console", false, false);
+        xbox_start_smc();
+        xSemaphoreTake(S.lock, portMAX_DELAY);
+        S.linked = false;
+        xSemaphoreGive(S.lock);
         st(100, "Flash verified", true, true);
     } else {
         st(0, "Verify failed", true, false);
