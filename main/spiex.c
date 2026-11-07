@@ -1,101 +1,67 @@
 /*
- * spiex.c — SPI register access to the Xbox 360 Southbridge flash controller.
+ * spiex.c — Xbox 360 Southbridge flash SPI, BIT-BANGED on GPIO.
  *
- * Ported to ESP32-S3 for TrinityWeb360. The register protocol, bit-reversal
- * table, and timing below are the known-good values from:
- *   GxOSS/espflasher (GPL-3.0)  <- balika011/PicoFlasher
- * Credits: balika011, 15432 (eMMC SPI), Hax360, ExposureMG (ESP32 port).
+ * The ESP32-S3 hardware SPI path (SPI2/FSPI + polling transfers) read back all
+ * zeros on this board, so the Xbox SB bus is driven by a plain GPIO bit-bang
+ * instead. This removes every hardware-SPI variable (IOMUX routing, DMA vs
+ * FIFO, input-delay/sampling) and mirrors how the RP2040 PicoFlasher drives the
+ * bus. The register protocol is identical to PicoFlasher's.
  *
- * This file is GPL-3.0. See LICENSE.
+ * Wire format: SPI mode 0 (CLK idles low; MOSI set up while CLK low; both ends
+ * sample on the rising edge; slave shifts on the falling edge) and LSB-FIRST
+ * on the wire. We shift LSB-first directly, so no bit-reversal table is needed:
+ * sending byte B bit0-first puts B on the wire LSB-first, and assembling the
+ * received bits bit0-first yields the real byte — exactly what the hardware
+ * path produced after its lsb2msb round-trip.
+ *
+ * GPL-3.0. See LICENSE.
  */
 #include "spiex.h"
 
-#include <string.h>
-
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_err.h"
+#include "esp_rom_sys.h"   /* esp_rom_delay_us */
 
 #include "pins.h"
 
-static spi_device_handle_t pfc_spi_dev;
 static bool pfc_spi_inited;
 
-#ifndef PFC_SPI_HOST
-#define PFC_SPI_HOST SPI2_HOST
+/* Half-clock delay. 0 relies on gpio call overhead (~1-2 MHz, reliable on short
+ * dupont). Raise (e.g. 1) if long/marginal wiring needs a slower, safer clock;
+ * the flash-config read is only 6 bytes so speed only matters for full dumps. */
+#ifndef SPIEX_BB_HALF_US
+#define SPIEX_BB_HALF_US 0
 #endif
 
-#ifndef PFC_SPI_CLOCK_HZ
-/* Foolproof bring-up: 4 MHz for maximum signal-integrity margin over dupont
- * jumpers. Dump time is per-transaction-overhead bound, not clock bound, so
- * the slow clock costs little. PicoFlasher runs 28 MHz; raise once reads are
- * proven reliable. */
-#define PFC_SPI_CLOCK_HZ (4 * 1000 * 1000)
+static inline void bb_delay(void)
+{
+#if SPIEX_BB_HALF_US > 0
+	esp_rom_delay_us(SPIEX_BB_HALF_US);
 #endif
-
-static const uint8_t lsb2msb[] = {
-	0x00, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10, 0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0,
-	0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58, 0xd8, 0x38, 0xb8, 0x78, 0xf8,
-	0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34, 0xb4, 0x74, 0xf4,
-	0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c, 0xfc,
-	0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2,
-	0x0a, 0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa,
-	0x06, 0x86, 0x46, 0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6,
-	0x0e, 0x8e, 0x4e, 0xce, 0x2e, 0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe,
-	0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61, 0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1,
-	0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19, 0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9,
-	0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55, 0xd5, 0x35, 0xb5, 0x75, 0xf5,
-	0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d, 0xbd, 0x7d, 0xfd,
-	0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73, 0xf3,
-	0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb,
-	0x07, 0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7,
-	0x0f, 0x8f, 0x4f, 0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff,
-};
+}
 
 void spiex_init(void)
 {
-	/* Idempotent: PicoFlasher re-inits SPI on every xbox_stop_smc(); ESP-IDF's
-	 * spi_bus_initialize is not re-entrant, so tear down a prior bus first. */
-	if (pfc_spi_inited) {
-		spiex_deinit();
-	}
-
-	gpio_config_t cs_cfg = {
+	gpio_config_t out = {
 		.intr_type = GPIO_INTR_DISABLE,
 		.mode = GPIO_MODE_OUTPUT,
-		.pin_bit_mask = 1ULL << SPI_SS_N,
+		.pin_bit_mask = (1ULL << SPI_SS_N) | (1ULL << SPI_MOSI) | (1ULL << SPI_CLK),
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
 	};
-	gpio_config(&cs_cfg);
-	gpio_set_level(SPI_SS_N, 1);
+	gpio_config(&out);
 
-	spi_bus_config_t buscfg = {
-		.mosi_io_num = SPI_MOSI,
-		.miso_io_num = SPI_MISO,
-		.sclk_io_num = SPI_CLK,
-		.quadwp_io_num = -1,
-		.quadhd_io_num = -1,
-		.max_transfer_sz = 0,
+	gpio_config_t in = {
+		.intr_type = GPIO_INTR_DISABLE,
+		.mode = GPIO_MODE_INPUT,
+		.pin_bit_mask = (1ULL << SPI_MISO),
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.pull_up_en = GPIO_PULLUP_ENABLE,   /* so an undriven line never reads 0 */
 	};
+	gpio_config(&in);
 
-	/* DMA DISABLED: every transfer here is tiny (<=6 bytes). On the ESP32-S3,
-	 * polling transfers with DMA + non-DMA-capable (stack) buffers can silently
-	 * read back zeros; the FIFO/CPU path used when DMA is off is reliable for
-	 * these small register reads and matches PicoFlasher's behaviour. */
-	ESP_ERROR_CHECK(spi_bus_initialize(PFC_SPI_HOST, &buscfg, SPI_DMA_DISABLED));
-
-	spi_device_interface_config_t devcfg = {
-		.clock_speed_hz = PFC_SPI_CLOCK_HZ,
-		.mode = 0,
-		.spics_io_num = -1,
-		.queue_size = 1,
-	};
-
-	ESP_ERROR_CHECK(spi_bus_add_device(PFC_SPI_HOST, &devcfg, &pfc_spi_dev));
-
-	/* Match PicoFlasher: pull MISO up so an undriven line never reads as 0. */
-	gpio_set_pull_mode(SPI_MISO, GPIO_PULLUP_ONLY);
+	gpio_set_level(SPI_CLK, 0);    /* mode 0: idle low */
+	gpio_set_level(SPI_MOSI, 0);
+	gpio_set_level(SPI_SS_N, 1);   /* deasserted */
 
 	pfc_spi_inited = true;
 }
@@ -105,12 +71,34 @@ void spiex_deinit(void)
 	if (!pfc_spi_inited) {
 		return;
 	}
-	if (pfc_spi_dev) {
-		spi_bus_remove_device(pfc_spi_dev);
-		pfc_spi_dev = NULL;
-	}
-	spi_bus_free(PFC_SPI_HOST);
+	/* Release the bus: everything back to hi-Z inputs so the SMC owns it. */
+	gpio_config_t hiz = {
+		.intr_type = GPIO_INTR_DISABLE,
+		.mode = GPIO_MODE_INPUT,
+		.pin_bit_mask = (1ULL << SPI_SS_N) | (1ULL << SPI_MOSI) |
+		                (1ULL << SPI_CLK) | (1ULL << SPI_MISO),
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+	};
+	gpio_config(&hiz);
 	pfc_spi_inited = false;
+}
+
+/* Full-duplex transfer of one byte, LSB-first, SPI mode 0. */
+static inline uint8_t bb_xfer(uint8_t out)
+{
+	uint8_t in = 0;
+	for (int i = 0; i < 8; i++) {
+		gpio_set_level(SPI_MOSI, (out >> i) & 1);  /* set up while CLK low */
+		bb_delay();
+		gpio_set_level(SPI_CLK, 1);                /* rising edge: sample */
+		bb_delay();
+		if (gpio_get_level(SPI_MISO)) {
+			in |= (uint8_t)(1u << i);
+		}
+		gpio_set_level(SPI_CLK, 0);                /* falling edge: slave shifts */
+	}
+	return in;
 }
 
 uint32_t spiex_read_reg(uint8_t reg)
@@ -118,47 +106,31 @@ uint32_t spiex_read_reg(uint8_t reg)
 	uint8_t txbuf[] = {(uint8_t)((reg << 2) | 1), 0xFF, 0x00, 0x00, 0x00, 0x00};
 	uint8_t rxbuf[sizeof(txbuf)];
 
-	for (int i = 0; i < (int)sizeof(txbuf); i++) {
-		txbuf[i] = lsb2msb[txbuf[i]];
-	}
-
 	gpio_set_level(SPI_SS_N, 0);
-
-	spi_transaction_t t;
-	memset(&t, 0, sizeof(t));
-	t.length = sizeof(txbuf) * 8;
-	t.tx_buffer = txbuf;
-	t.rx_buffer = rxbuf;
-	ESP_ERROR_CHECK(spi_device_polling_transmit(pfc_spi_dev, &t));
-
+	for (int i = 0; i < (int)sizeof(txbuf); i++) {
+		rxbuf[i] = bb_xfer(txbuf[i]);
+	}
 	gpio_set_level(SPI_SS_N, 1);
 
-	for (int i = 0; i < (int)sizeof(rxbuf); i++) {
-		rxbuf[i] = lsb2msb[rxbuf[i]];
-	}
-
 	uint32_t v;
-	memcpy(&v, &rxbuf[2], 4);
+	v = (uint32_t)rxbuf[2] | ((uint32_t)rxbuf[3] << 8) |
+	    ((uint32_t)rxbuf[4] << 16) | ((uint32_t)rxbuf[5] << 24);
 	return v;
 }
 
 void spiex_write_reg(uint8_t reg, uint32_t val)
 {
-	uint8_t txbuf[] = {(uint8_t)((reg << 2) | 2), 0x00, 0x00, 0x00, 0x00};
-
-	memcpy(&txbuf[1], &val, 4);
-
-	for (int i = 0; i < (int)sizeof(txbuf); i++) {
-		txbuf[i] = lsb2msb[txbuf[i]];
-	}
+	uint8_t txbuf[] = {
+		(uint8_t)((reg << 2) | 2),
+		(uint8_t)(val & 0xFF),
+		(uint8_t)((val >> 8) & 0xFF),
+		(uint8_t)((val >> 16) & 0xFF),
+		(uint8_t)((val >> 24) & 0xFF),
+	};
 
 	gpio_set_level(SPI_SS_N, 0);
-
-	spi_transaction_t t;
-	memset(&t, 0, sizeof(t));
-	t.length = sizeof(txbuf) * 8;
-	t.tx_buffer = txbuf;
-	ESP_ERROR_CHECK(spi_device_polling_transmit(pfc_spi_dev, &t));
-
+	for (int i = 0; i < (int)sizeof(txbuf); i++) {
+		(void)bb_xfer(txbuf[i]);
+	}
 	gpio_set_level(SPI_SS_N, 1);
 }
