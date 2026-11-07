@@ -29,7 +29,9 @@ static bool pfc_spi_inited;
  * dupont). Raise (e.g. 1) if long/marginal wiring needs a slower, safer clock;
  * the flash-config read is only 6 bytes so speed only matters for full dumps. */
 #ifndef SPIEX_BB_HALF_US
-#define SPIEX_BB_HALF_US 0
+#define SPIEX_BB_HALF_US 4   /* ~100 kHz: slow, clean edges + MISO settle time.
+                              * The flash-config read is 6 bytes so this is
+                              * instant; drop back toward 0 once reads work. */
 #endif
 
 static inline void bb_delay(void)
