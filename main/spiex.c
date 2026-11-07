@@ -20,18 +20,24 @@
 
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"   /* esp_rom_delay_us */
+#include "freertos/FreeRTOS.h"
 
 #include "pins.h"
 
 static bool pfc_spi_inited;
 
+/* Guards each transfer so no ISR/task switch can stretch a clock phase into the
+ * SB flash controller's transaction timeout (the RP2040 is bare-metal and never
+ * hits this). Transfers are tiny (<=6 bytes), so the critical section is short. */
+static portMUX_TYPE bb_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* Half-clock delay. 0 relies on gpio call overhead (~1-2 MHz, reliable on short
  * dupont). Raise (e.g. 1) if long/marginal wiring needs a slower, safer clock;
  * the flash-config read is only 6 bytes so speed only matters for full dumps. */
 #ifndef SPIEX_BB_HALF_US
-#define SPIEX_BB_HALF_US 4   /* ~100 kHz: slow, clean edges + MISO settle time.
-                              * The flash-config read is 6 bytes so this is
-                              * instant; drop back toward 0 once reads work. */
+#define SPIEX_BB_HALF_US 1   /* ~300-500 kHz. With the critical section the whole
+                              * 6-byte transfer is uninterrupted, so edges stay
+                              * clean and the SB never times out mid-read. */
 #endif
 
 static inline void bb_delay(void)
@@ -108,11 +114,13 @@ uint32_t spiex_read_reg(uint8_t reg)
 	uint8_t txbuf[] = {(uint8_t)((reg << 2) | 1), 0xFF, 0x00, 0x00, 0x00, 0x00};
 	uint8_t rxbuf[sizeof(txbuf)];
 
+	taskENTER_CRITICAL(&bb_mux);
 	gpio_set_level(SPI_SS_N, 0);
 	for (int i = 0; i < (int)sizeof(txbuf); i++) {
 		rxbuf[i] = bb_xfer(txbuf[i]);
 	}
 	gpio_set_level(SPI_SS_N, 1);
+	taskEXIT_CRITICAL(&bb_mux);
 
 	uint32_t v;
 	v = (uint32_t)rxbuf[2] | ((uint32_t)rxbuf[3] << 8) |
@@ -130,9 +138,11 @@ void spiex_write_reg(uint8_t reg, uint32_t val)
 		(uint8_t)((val >> 24) & 0xFF),
 	};
 
+	taskENTER_CRITICAL(&bb_mux);
 	gpio_set_level(SPI_SS_N, 0);
 	for (int i = 0; i < (int)sizeof(txbuf); i++) {
 		(void)bb_xfer(txbuf[i]);
 	}
 	gpio_set_level(SPI_SS_N, 1);
+	taskEXIT_CRITICAL(&bb_mux);
 }
