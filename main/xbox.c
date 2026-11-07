@@ -32,32 +32,26 @@ static void sleep_ms(int ms)
 void xbox_init(void)
 {
 	/*
-	 * Idle electrical state, matching the proven GxOSS/PicoFlasher reference:
-	 *
-	 *   SMC_DBG_EN = 0  — LOW so the SMC runs from power-on and initialises the
-	 *                     SB flash controller. (Idling it HIGH halts the SMC
-	 *                     before it ever sets the controller up, so every later
-	 *                     register read floats to the MISO pull-up and returns
-	 *                     0xFFFFFFFF — the classic "flash config 0xFFFFFFFF".)
-	 *   SMC_RST_XDK_N = 1 — reset de-asserted.
-	 *
-	 * Only the two SMC *control* lines (driven by the flasher alone, never by
-	 * the SMC) are configured here. The shared SPI bus (CLK/MOSI/MISO/SS) is
-	 * left hi-Z until xbox_stop_smc() calls spiex_init() to take it, so an
-	 * attached-but-idle ESP never contends with the running SMC and the console
-	 * boots normally.
+	 * Match the PROVEN X360Tools/PicoFlasher (RP2040) idle state exactly — it is
+	 * known-good on this console/wiring:
+	 *   SMC_DBG_EN    = 1
+	 *   SMC_RST_XDK_N = 1
+	 *   SPI_SS_N      = 1   (configured as an output HERE so it is driven during
+	 *                        the xbox_stop_smc() handshake, before spiex_init()).
+	 * The SPI peripheral itself is brought up at the END of xbox_stop_smc().
 	 */
 	gpio_config_t cfg = {
 		.intr_type = GPIO_INTR_DISABLE,
 		.mode = GPIO_MODE_OUTPUT,
-		.pin_bit_mask = (1ULL << SMC_DBG_EN) | (1ULL << SMC_RST_XDK_N),
+		.pin_bit_mask = (1ULL << SMC_DBG_EN) | (1ULL << SMC_RST_XDK_N) | (1ULL << SPI_SS_N),
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
 	};
 	gpio_config(&cfg);
 
-	gpio_set_level(SMC_DBG_EN, 0);
+	gpio_set_level(SMC_DBG_EN, 1);
 	gpio_set_level(SMC_RST_XDK_N, 1);
+	gpio_set_level(SPI_SS_N, 1);
 }
 
 bool xbox_smc_stopped = false;
@@ -81,13 +75,9 @@ void xbox_start_smc(void)
 
 void xbox_stop_smc(void)
 {
-	/* Take the shared SPI bus BEFORE the handshake so SPI_SS_N (and CLK/MOSI)
-	 * are real outputs during the sequence below — GxOSS/PicoFlasher drive SS
-	 * throughout the stop handshake. (Idempotent: re-inits on repeat stops.)
-	 * No SPI transaction runs until the handshake finishes, so the ESP only
-	 * holds CLK/MOSI at their idle levels while DBG_EN transitions. */
-	spiex_init();
-
+	/* Exact X360Tools/PicoFlasher sequence. SS is already a driven output (from
+	 * xbox_init), so the handshake drives it correctly; the SPI peripheral is
+	 * brought up at the END, after the SMC has released the bus. */
 	gpio_set_level(SMC_DBG_EN, 0);
 	sleep_ms(50);
 
@@ -102,9 +92,7 @@ void xbox_stop_smc(void)
 	gpio_set_level(SPI_SS_N, 1);
 	sleep_ms(50);
 
-	/* On eMMC consoles a CLK edge before SPI debug mode is entered corrupts
-	 * the next transfer; discard one read (hax360/PicoFlasher 26cd270). */
-	(void)spiex_read_reg(0);
+	spiex_init();
 
 	xbox_smc_stopped = true;
 }

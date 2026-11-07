@@ -79,7 +79,11 @@ void spiex_init(void)
 		.max_transfer_sz = 0,
 	};
 
-	ESP_ERROR_CHECK(spi_bus_initialize(PFC_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+	/* DMA DISABLED: every transfer here is tiny (<=6 bytes). On the ESP32-S3,
+	 * polling transfers with DMA + non-DMA-capable (stack) buffers can silently
+	 * read back zeros; the FIFO/CPU path used when DMA is off is reliable for
+	 * these small register reads and matches PicoFlasher's behaviour. */
+	ESP_ERROR_CHECK(spi_bus_initialize(PFC_SPI_HOST, &buscfg, SPI_DMA_DISABLED));
 
 	spi_device_interface_config_t devcfg = {
 		.clock_speed_hz = PFC_SPI_CLOCK_HZ,
