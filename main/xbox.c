@@ -15,10 +15,13 @@
 
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "pins.h"
+
+static const char *XTAG = "xbox";
 #include "spiex.h"
 
 static void sleep_ms(int ms)
@@ -40,9 +43,10 @@ void xbox_init(void)
 	 *                        the xbox_stop_smc() handshake, before spiex_init()).
 	 * The SPI peripheral itself is brought up at the END of xbox_stop_smc().
 	 */
+	/* INPUT_OUTPUT so we can read the real pad level back for diagnostics. */
 	gpio_config_t cfg = {
 		.intr_type = GPIO_INTR_DISABLE,
-		.mode = GPIO_MODE_OUTPUT,
+		.mode = GPIO_MODE_INPUT_OUTPUT,
 		.pin_bit_mask = (1ULL << SMC_DBG_EN) | (1ULL << SMC_RST_XDK_N) | (1ULL << SPI_SS_N),
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
@@ -52,6 +56,14 @@ void xbox_init(void)
 	gpio_set_level(SMC_DBG_EN, 1);
 	gpio_set_level(SMC_RST_XDK_N, 1);
 	gpio_set_level(SPI_SS_N, 1);
+
+	/* Diagnostic: confirm the chip can actually drive these high. If a readback
+	 * is 0 right after driving 1, the pad is held low externally (short / strong
+	 * pulldown) or the pin can't drive. */
+	ESP_LOGW(XTAG, "init readback DBG_EN(%d)=%d RST(%d)=%d SS(%d)=%d (want 1,1,1)",
+	         SMC_DBG_EN, gpio_get_level(SMC_DBG_EN),
+	         SMC_RST_XDK_N, gpio_get_level(SMC_RST_XDK_N),
+	         SPI_SS_N, gpio_get_level(SPI_SS_N));
 }
 
 bool xbox_smc_stopped = false;
@@ -91,6 +103,11 @@ void xbox_stop_smc(void)
 
 	gpio_set_level(SPI_SS_N, 1);
 	sleep_ms(50);
+
+	/* Diagnostic: after the handshake DBG_EN and RST must be high (SMC halted).
+	 * If either reads 0 here, the pad is held low externally or isn't driving. */
+	ESP_LOGW(XTAG, "stop_smc readback DBG_EN=%d RST=%d (want 1,1)",
+	         gpio_get_level(SMC_DBG_EN), gpio_get_level(SMC_RST_XDK_N));
 
 	spiex_init();
 
