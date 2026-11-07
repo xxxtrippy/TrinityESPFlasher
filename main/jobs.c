@@ -28,6 +28,7 @@
 #include "rgb.h"
 #include "nand_ecc.h"
 #include "esp_heap_caps.h"
+#include "xellnet.h"
 
 static const char *TAG = "jobs";
 
@@ -278,6 +279,24 @@ static void job_build(void)
         st(100, "Image verified", true, true);
     } else {
         st(bp.percent, build_status_str(bs), true, false);
+    }
+}
+
+/* Capture the CPU key over WiFi from a console that has booted XeLL.
+ * Run this after XEL has written XeLL and the console has glitched into it:
+ * XeLL serves its CPU key on an HTTP page; xellnet_fetch() scans the ESP's
+ * subnet, scrapes + ECC-validates the key, and writes /sd/cpukey.txt. No PC. */
+static void job_getkey(void)
+{
+    char key[33];
+    st(2, "Scanning for XeLL", false, false);
+    if (xellnet_fetch(key)) {
+        /* xellnet_fetch already saved cpukey.txt + loaded it into the engine. */
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Key: %.8s...", key);
+        st(100, msg, true, true);
+    } else {
+        st(0, "No XeLL / no key", true, false);
     }
 }
 
@@ -642,6 +661,11 @@ static void worker_task(void *arg)
                 job_xell();
                 break;
 
+            case JOB_GETKEY:
+                rgb_building();
+                job_getkey();
+                break;
+
             default:
                 break;
         }
@@ -680,7 +704,9 @@ bool jobs_start(job_t job)
 
     xSemaphoreTake(S.lock, portMAX_DELAY);
 
-    if (!S.busy && (job == JOB_NONE || S.linked)) {
+    /* JOB_GETKEY is a pure-WiFi capture from a console booted into XeLL, so it
+     * does NOT require the SMC-stopped link the NAND jobs need. */
+    if (!S.busy && (job == JOB_NONE || job == JOB_GETKEY || S.linked)) {
         S.busy = true;
         S.job = job;
         S.done = false;

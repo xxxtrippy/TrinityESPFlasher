@@ -60,7 +60,7 @@
 #define BTN_Y 160
 #define BTN_H 60
 
-#define N_BTNS 5
+#define N_BTNS 6
 
 typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED, BS_DISABLED } btn_state_t;
 
@@ -72,11 +72,12 @@ typedef struct {
 } btn_t;
 
 static const btn_t s_btns[N_BTNS] = {
-    { 4,   58, "FND",  "FND: find console",          JOB_NONE  },
-    { 64,  58, "DMP",  "DMP: dump NAND (2 reads)",   JOB_DUMP  },
-    { 124, 58, "XEL",  "XEL: write RGH3 XeLL",       JOB_XELL  },
-    { 184, 58, "BLD",  "BLD: build image",           JOB_BUILD },
-    { 244, 72, "FLSH", "FLSH: flash + verify",       JOB_FLASH },
+    { 4,   58, "FND",  "FND: find console",          JOB_NONE   },
+    { 64,  58, "DMP",  "DMP: dump NAND (2 reads)",   JOB_DUMP   },
+    { 124, 58, "XEL",  "XEL: write RGH3 XeLL",       JOB_XELL   },
+    { 184, 58, "BLD",  "BLD: build image",           JOB_BUILD  },
+    { 4,   72, "KEY",  "KEY: grab CPU key (WiFi)",   JOB_GETKEY },
+    { 244, 72, "FLSH", "FLSH: flash + verify",       JOB_FLASH  },
 };
 
 static int s_sel = 0;
@@ -94,11 +95,12 @@ static bool s_flashable = false;       /* a verified image is ready       */
 static bool btn_enabled(int i)
 {
     switch (i) {
-        case 0: return true;
-        case 1: return s_console_ready;
-        case 2: return s_console_ready && s_have_dump;
-        case 3: return s_console_ready && s_have_dump;
-        case 4: return s_console_ready && s_flashable;
+        case 0: return true;                                /* FND  */
+        case 1: return s_console_ready;                     /* DMP  */
+        case 2: return s_console_ready && s_have_dump;      /* XEL  */
+        case 3: return s_console_ready && s_have_dump;      /* BLD  */
+        case 4: return true;                                /* KEY: WiFi, console in XeLL */
+        case 5: return s_console_ready && s_flashable;      /* FLSH */
     }
     return false;
 }
@@ -323,7 +325,7 @@ static void draw_status(const job_status_t *s)
         } else if (s->linked && s->have_dump && !s_have_dump) {
             s_sel = 2;                                   /* DMP done -> XEL  */
         } else if (s->linked && s->flashable && !s_flashable) {
-            s_sel = 4;                                   /* BLD done -> FLSH */
+            s_sel = 5;                                   /* BLD done -> FLSH */
         }
 
         s_console_ready = s->linked;
