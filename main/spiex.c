@@ -40,22 +40,69 @@ static portMUX_TYPE bb_mux = portMUX_INITIALIZER_UNLOCKED;
                               * clean and the SB never times out mid-read. */
 #endif
 
+/* Half-clock delay in microseconds; detect retries with slower clocks. */
+static int bb_half_us = SPIEX_BB_HALF_US;
+
+void spiex_set_half_us(int us)
+{
+	bb_half_us = us < 0 ? 0 : us;
+}
+
 static inline void bb_delay(void)
 {
-#if SPIEX_BB_HALF_US > 0
-	esp_rom_delay_us(SPIEX_BB_HALF_US);
-#endif
+	if (bb_half_us > 0) {
+		esp_rom_delay_us((uint32_t)bb_half_us);
+	}
+}
+
+void spiex_bus_hold(void)
+{
+	/* Before the SMC-stop handshake: SS driven high, CLK and MOSI driven LOW,
+	 * MISO a plain input. PicoFlasher has pull-downs on CLK/MOSI at this point
+	 * and GxOSS/espflasher drives them from boot; leaving them floating while
+	 * SS is held low for 100 ms can clock noise into the SB flash bridge.
+	 * Also re-arms SS as an output after spiex_deinit() made it hi-Z (without
+	 * this a second detect could not pull SS low and the handshake failed). */
+	gpio_set_level(SPI_SS_N, 1);
+	gpio_set_level(SPI_CLK, 0);
+	gpio_set_level(SPI_MOSI, 0);
+
+	gpio_config_t out = {
+		.intr_type = GPIO_INTR_DISABLE,
+		.mode = GPIO_MODE_INPUT_OUTPUT,   /* readable for diagnostics */
+		.pin_bit_mask = (1ULL << SPI_SS_N) | (1ULL << SPI_MOSI) | (1ULL << SPI_CLK),
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+	};
+	gpio_config(&out);
+
+	gpio_config_t in = {
+		.intr_type = GPIO_INTR_DISABLE,
+		.mode = GPIO_MODE_INPUT,
+		.pin_bit_mask = (1ULL << SPI_MISO),
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+	};
+	gpio_config(&in);
+
+	gpio_set_level(SPI_SS_N, 1);
+	gpio_set_level(SPI_CLK, 0);
+	gpio_set_level(SPI_MOSI, 0);
 }
 
 void spiex_init(void)
 {
 	gpio_config_t out = {
 		.intr_type = GPIO_INTR_DISABLE,
-		.mode = GPIO_MODE_OUTPUT,
+		.mode = GPIO_MODE_INPUT_OUTPUT,
 		.pin_bit_mask = (1ULL << SPI_SS_N) | (1ULL << SPI_MOSI) | (1ULL << SPI_CLK),
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
 	};
+	/* Levels first, so switching the pads to outputs cannot glitch them. */
+	gpio_set_level(SPI_SS_N, 1);
+	gpio_set_level(SPI_CLK, 0);
+	gpio_set_level(SPI_MOSI, 0);
 	gpio_config(&out);
 
 	gpio_config_t in = {
@@ -109,10 +156,9 @@ static inline uint8_t bb_xfer(uint8_t out)
 	return in;
 }
 
-uint32_t spiex_read_reg(uint8_t reg)
+void spiex_read_raw(uint8_t reg, uint8_t rxbuf[6])
 {
 	uint8_t txbuf[] = {(uint8_t)((reg << 2) | 1), 0xFF, 0x00, 0x00, 0x00, 0x00};
-	uint8_t rxbuf[sizeof(txbuf)];
 
 	taskENTER_CRITICAL(&bb_mux);
 	gpio_set_level(SPI_SS_N, 0);
@@ -121,6 +167,29 @@ uint32_t spiex_read_reg(uint8_t reg)
 	}
 	gpio_set_level(SPI_SS_N, 1);
 	taskEXIT_CRITICAL(&bb_mux);
+}
+
+char spiex_probe_miso(void)
+{
+	/* SS is high here, so nothing should be driving MISO hard. */
+	gpio_set_pull_mode(SPI_MISO, GPIO_PULLDOWN_ONLY);
+	esp_rom_delay_us(200);
+	int lo = gpio_get_level(SPI_MISO);
+	gpio_set_pull_mode(SPI_MISO, GPIO_PULLUP_ONLY);     /* normal state */
+	esp_rom_delay_us(200);
+	int hi = gpio_get_level(SPI_MISO);
+
+	if (!lo && hi) return 'F';      /* follows the pull: floating / tri-stated */
+	if (!lo && !hi) return 'L';     /* held low: short to GND or driven low    */
+	if (lo && hi) return 'H';       /* held high                               */
+	return '?';
+}
+
+uint32_t spiex_read_reg(uint8_t reg)
+{
+	uint8_t rxbuf[6];
+
+	spiex_read_raw(reg, rxbuf);
 
 	uint32_t v;
 	v = (uint32_t)rxbuf[2] | ((uint32_t)rxbuf[3] << 8) |

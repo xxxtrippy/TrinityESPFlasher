@@ -1,21 +1,16 @@
-# TrinityWebFlasher — complete walkthrough
+# TrinityESPFlasher — complete walkthrough
 
 From a bare ESP32-S3 to a flashed Trinity NAND, start to finish. Written for
 someone new to the command line — every terminal step is spelled out.
 
-> **What this tool is:** the **NAND read/write** half of an RGH install — the
-> part the RP2040 + J-Runner normally does. It does **not** install a glitch
-> chip and does **not** obtain your CPU key; your existing glitch/xeLL setup
-> does that (see Phase 6). This tool dumps the NAND, (eventually) builds the
-> glitch image on-chip, and flashes it back — standalone, from a touch screen.
+> **What this tool is:** a standalone NAND flasher and RGH3 image builder for
+> the Trinity. It dumps the NAND, re-targets a finished RGH3 image at that
+> console on the ESP, and flashes it back, from a touch screen.
 
-> **Read this first — current limits:** Detect and Dump work today. The image
-> **Build** is wired end-to-end but returns `NOT_VERIFIED` and the **Flash**
-> button refuses a built image until its ECC/crypto is verified on-bench
-> (`BUILD_ECC_VERIFIED` / `BUILD_CRYPTO_VERIFIED` in `main/build_image.c`). So
-> today you can use it as a verified NAND **dumper**; building and flashing a
-> bootable RGH image is the remaining work. Everything below describes the full
-> intended flow and flags where the gate stops you.
+> **Read this first — current limits:** the image **Build** is verified (on a
+> PC and with `REFIMG.BIN` on the device) against real J-Runner images. The
+> **console link** (Detect / Dump / Flash) has not worked on the bench yet; see
+> "Known issues" in the README for the two quick tests that narrow it down.
 
 ---
 
@@ -84,13 +79,13 @@ In the ESP-IDF PowerShell:
 
 ```
 cd ~\Documents
-git clone https://github.com/xxxtrippy/TrinityWebFlasher.git
-cd TrinityWebFlasher
+git clone https://github.com/xxxtrippy/TrinityESPFlasher.git
+cd TrinityESPFlasher
 ```
 
 If you don't have `git`, download the repo ZIP from the GitHub page
 ("Code → Download ZIP"), extract it to `Documents`, then
-`cd ~\Documents\TrinityWebFlasher-main`.
+`cd ~\Documents\TrinityESPFlasher-main`.
 
 ---
 
@@ -141,25 +136,26 @@ release **BOOT**, and run the `idf.py -p COM5 flash` line again.
 
 ## Phase 6 — Prepare the microSD card
 
-Format the card **FAT32**, then put two things on it:
+Format the card **FAT32**, then put this on it:
 
 ```
-/cpukey.txt            <- your console's CPU key, 32 hex characters
-/xebuild/data/         <- the xeBuild data package for your dashboard
-   cb.bin  cbb.bin  cd.bin  ce.bin  patches.bin  smc.bin  xell-reloaded.bin
+/RGH3BASE.BIN            <- a finished RGH3 image (J-Runner's updflash.bin, 17,301,504 bytes)
+/cpukey.txt              <- the target console's CPU key, 32 hex characters
+/xell/TRINITY_RGH3.ecc   <- only for XEL on a stock console (J-Runner common/xell-images/glitch2)
+/xell/xell-gggggg.bin    <- optional, newer XeLL for XEL (J-Runner xeBuild/data)
 ```
 
-- **`cpukey.txt`** — just paste your 32-hex-character CPU key into a plain text
-  file. The firmware reads the first 32 hex characters, so extra text/notes are
-  fine. **Where the CPU key comes from:** your console must already be glitched;
-  boot **xeLL-reloaded**, which prints the CPU key on screen — copy it down.
-  This tool can't compute it from a dump (that's the 360's security, not a
-  limitation here; J-Runner needs it the same way).
-- **`xebuild/data/`** — this is the exact `data` folder your working
-  **J-Runner-With-Extras** install already has for your target dashboard. It's
-  Microsoft-derived, so it isn't shipped with this project — you supply your own
-  copy. If your bootloader files are named differently, rename them to match the
-  list above, or edit the ingredient names in `main/build_image.c`.
+- **`RGH3BASE.BIN`** is the image the builder re-targets: every image the tool
+  builds has its dashboard version and patch set. It is Microsoft-derived and
+  holds a KeyVault, so it is not shipped with this project and should not be
+  shared.
+- **`cpukey.txt`**: the first 32 hex characters are used. With it the builder
+  checks the dump's KeyVault before writing anything. A stock console's key is
+  read with XEL + KEY.
+- To try Build without a console link, also copy a NAND read of the console as
+  both `NANDDUMP.BIN` and `BACKUP.BIN`. If the image you expect is on the card
+  as `REFIMG.BIN`, Build compares against it and shows **Image = REFIMG**.
+  Delete `REFIMG.BIN` afterwards: with it present, any other build is refused.
 
 Insert the card into the SD module.
 
@@ -181,32 +177,25 @@ Insert the card into the SD module.
 
 ## Phase 8 — The flashing workflow (on the screen)
 
-**1. Detect.** Tap **Detect**. It stops the console's SMC and reads the flash
-config. The info line should show `cfg 0x########`. A sane value (not all zeros
-or all Fs) means your J2C1 wiring is good. If it fails, recheck the six J2C1
-wires and the common ground.
+**1. FND (detect).** Stops the console's SMC and reads the flash config. The
+info line shows `cfg 0x00023010` on a 16 MB Trinity. If nothing answers it
+shows `nolink ...` instead; see "Known issues" in the README.
 
-**2. Dump.** Tap **Dump**. It reads the whole 16 MB NAND **twice** and compares
-the two reads:
-- Progress bar runs; status ends **green "dump verified"** if both reads match.
-- If it ends **red "reads differ"**, your wiring is marginal — reseat and retry.
-   A clean dual-read match is your safety net; never skip it.
+**2. DMP (dump).** Reads the whole 16 MB NAND **twice** and compares the reads.
+Green "Dump verified" means both matched; the dump is saved on the card as
+`NANDDUMP.BIN` and `BACKUP.BIN`. Red means the wiring is marginal: reseat and
+retry.
 
-The verified dump is held in PSRAM for the next step. *(This dump is also your
-backup — the current firmware keeps it in RAM for the build; saving it to the SD
-card is a sensible future add if you want an on-card copy before writing.)*
+**3. XEL and KEY (stock consoles only).** XEL writes an RGH3 XeLL image with the
+console's own KeyVault; the console then boots XeLL and KEY reads the CPU key
+over WiFi into `cpukey.txt`.
 
-**3. Build.** Tap **Build**. It loads your CPU key from `cpukey.txt`, checks the
-`xebuild/data` package, and assembles the glitch image from your dump.
-- **Today this ends amber "image built but crypto stages not yet bench-verified"
-  and does NOT mark the image flashable.** That's the safety gate — see the note
-  at the top. It will stay gated until the ECC/keyvault crypto is verified
-  against a known-good J-Runner build.
+**4. BLD (build).** Needs only the SD card. Checks the dump and `RGH3BASE.BIN`,
+authenticates the KeyVault with the CPU key, writes `IMAGE.BIN` and self-checks
+it. Green "Image verified" unlocks FLSH.
 
-**4. Flash.** Tap **Flash**. It writes a **verified** image back to the NAND and
-reads it back to confirm.
-- Until Build produces a verified image, Flash reports **"no verified image"**
-  and does nothing — by design, so you can't brick a console on unproven output.
+**5. FLSH (flash).** Writes `IMAGE.BIN`, reads it back to confirm, then restarts
+the console. It does nothing unless a build passed its self-check.
 
 ---
 

@@ -1,6 +1,7 @@
 #ifndef NAND_ECC_H
 #define NAND_ECC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -11,17 +12,25 @@
  * at spare offset 12, i.e. page offset 0x20C.
  *
  * VERIFIED: nand_ecc_calc() reproduces the stored ECC word of every page of
- * J-Runner's bundled Trinity images (TRINITY.ecc, TRINITY_RGH3.ecc,
- * TRINITY_CR4.ecc: 2560 of 2560 pages each, zero mismatches).
+ * full 16 MB xeBuild Trinity images (32768 of 32768 pages, zero mismatches),
+ * see tools/test_build_image.c.
  */
 
-/* ECC word for one raw 0x210-byte page. The ECC field itself (0x20C..0x20F) is
- * ignored, so this works on a page whose ECC is stale or blank. */
+/* ECC word for one raw 0x210-byte page, with the low 6 bits clear. The stored
+ * ECC bits are ignored, but the 6 FsBlockType bits in the byte at 0x20C are an
+ * input, so they must already hold their final value. */
 uint32_t nand_ecc_calc(const uint8_t page[0x210]);
 
-/* Recompute and store the ECC word in place. The 12 metadata bytes are kept
- * exactly as they are, so a page taken from a dump keeps its real metadata. */
+/* Recompute and store the ECC word in place. The 12 metadata bytes and the 6
+ * FsBlockType bits are kept exactly as they are. Never call this on an erased
+ * (all 0xFF) page: it would stop being erased. */
 void nand_ecc_fix_page(uint8_t page[0x210]);
+
+/* True if the whole raw page is 0xFF (erased). */
+bool nand_page_is_blank(const uint8_t page[0x210]);
+
+/* True if the stored ECC matches the page (erased pages count as good). */
+bool nand_ecc_page_ok(const uint8_t page[0x210]);
 
 /* Build a spare for a page that has no existing metadata: bootloader-area
  * metadata (block number = page_no/32 at byte 1, 0xFF at byte 5) plus the ECC.

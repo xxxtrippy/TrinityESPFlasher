@@ -14,6 +14,7 @@ idf_component_register(
         "spiex.c"
         "xbox.c"
         "nand_ecc.c"
+        "flashfs.c"
         "xenon_keys.c"
         "xecrypt_bl.c"
         "smc.c"
@@ -23,6 +24,7 @@ idf_component_register(
         "rgb.c"
         "kuart.c"
         "usbpf.c"
+        "picolink.c"
         "xellnet.c"
     INCLUDE_DIRS
         "."
@@ -37,6 +39,7 @@ idf_component_register(
         sdmmc
         esp_timer
         esp_driver_rmt
+        usb
         esp_driver_uart
         esp_tinyusb
         esp_http_client

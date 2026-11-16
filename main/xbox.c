@@ -11,9 +11,11 @@
  */
 #include "xbox.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -87,9 +89,11 @@ void xbox_start_smc(void)
 
 void xbox_stop_smc(void)
 {
-	/* Exact X360Tools/PicoFlasher sequence. SS is already a driven output (from
-	 * xbox_init), so the handshake drives it correctly; the SPI peripheral is
-	 * brought up at the END, after the SMC has released the bus. */
+	/* X360Tools/PicoFlasher sequence. First make sure SS is a driven output
+	 * (spiex_deinit() leaves it hi-Z after a flash) and CLK/MOSI are held low
+	 * instead of floating while SS is asserted. */
+	spiex_bus_hold();
+
 	gpio_set_level(SMC_DBG_EN, 0);
 	sleep_ms(50);
 
@@ -127,6 +131,91 @@ uint32_t xbox_get_flash_config(void)
 		xbox_cached_flash_config = 0xC0462002;
 	}
 	return xbox_cached_flash_config;
+}
+
+/* Is this wire tied to something? Release the pin and see whether it follows
+ * the ESP's own weak pulls ('F': floating - not connected, or the far end is
+ * hi-Z) or is held 'L' / 'H' by the console. */
+static char probe_wire(int pin)
+{
+	gpio_set_direction(pin, GPIO_MODE_INPUT);
+	gpio_set_pull_mode(pin, GPIO_PULLDOWN_ONLY);
+	esp_rom_delay_us(500);
+	int lo = gpio_get_level(pin);
+	gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+	esp_rom_delay_us(500);
+	int hi = gpio_get_level(pin);
+	gpio_set_pull_mode(pin, GPIO_FLOATING);
+
+	if (!lo && hi) return 'F';
+	if (!lo && !hi) return 'L';
+	if (lo && hi) return 'H';
+	return '?';
+}
+
+void xbox_link_diag(char *out, size_t out_sz)
+{
+	if (!xbox_smc_stopped) {
+		snprintf(out, out_sz, "no link: SMC not stopped");
+		return;
+	}
+	uint8_t rx[6];
+	spiex_read_raw(0, rx);
+	uint32_t cfg = (uint32_t)rx[2] | ((uint32_t)rx[3] << 8) | ((uint32_t)rx[4] << 16) | ((uint32_t)rx[5] << 24);
+	int dbg = gpio_get_level(SMC_DBG_EN), rst = gpio_get_level(SMC_RST_XDK_N);
+
+	/* Bench self-test: with the console unplugged and MOSI jumpered to MISO the
+	 * ESP reads back exactly what it sent (01 FF 00 00 00 00). */
+	if (rx[0] == 0x01 && rx[1] == 0xFF && cfg == 0) {
+		snprintf(out, out_sz, "loopback OK: ESP pins work");
+		ESP_LOGW(XTAG, "link diag: MOSI->MISO loopback detected, ESP side is fine");
+		return;
+	}
+
+	/* Every wire released in turn: SS, CLK, MOSI, MISO, DBG_EN, RST. The SMC
+	 * reset line has a pull-up on the console, so RST must read 'H' if that
+	 * wire really reaches the board. */
+	static const int pins[6] = { SPI_SS_N, SPI_CLK, SPI_MOSI, SPI_MISO, SMC_DBG_EN, SMC_RST_XDK_N };
+	char w[7];
+	for (int i = 0; i < 6; i++) w[i] = probe_wire(pins[i]);
+	w[6] = 0;
+
+	/* Can each output pin really drive its pad? Drive 1 then 0 and read the pad
+	 * back: 'K' ok, 'h' stuck high, 'l' stuck low. MISO is an input: its slot
+	 * is 'J' if it follows MOSI (jumper fitted), else '-'. */
+	char d[7];
+	for (int i = 0; i < 6; i++) {
+		int p = pins[i];
+		if (p == SPI_MISO) { d[i] = '-'; continue; }
+		gpio_set_pull_mode(p, GPIO_FLOATING);
+		gpio_set_direction(p, GPIO_MODE_INPUT_OUTPUT);
+		gpio_set_level(p, 1); esp_rom_delay_us(200); int hi = gpio_get_level(p);
+		int m1 = gpio_get_level(SPI_MISO);
+		gpio_set_level(p, 0); esp_rom_delay_us(200); int lo = gpio_get_level(p);
+		int m0 = gpio_get_level(SPI_MISO);
+		d[i] = (hi && !lo) ? 'K' : (hi ? 'h' : 'l');
+		if (p == SPI_MOSI && m1 && !m0) d[3] = 'J';
+		gpio_set_direction(p, GPIO_MODE_INPUT);
+	}
+	if (d[3] != 'J') d[3] = '-';
+	d[6] = 0;
+
+	/* Put the pins back and repeat the handshake so the console is left in the
+	 * same state as after a normal detect (SMC halted, if the wiring allows). */
+	xbox_init();
+	xbox_stop_smc();
+
+	/* Idle levels the firmware leaves on each pad, read back in the same order
+	 * (SS CLK MOSI MISO DBG RST). The control lines SS and RST are active-low,
+	 * so a healthy idle is 1 0 0 1 1 1: SS deasserted and RST released high. If
+	 * SS or RST read 0 here the SMC is held selected/in-reset and cannot answer. */
+	char idle[7];
+	for (int i = 0; i < 6; i++) idle[i] = gpio_get_level(pins[i]) ? '1' : '0';
+	idle[6] = 0;
+
+	(void)dbg; (void)rst; (void)w;
+	snprintf(out, out_sz, "nl %02X%02X %08lX d=%s i=%s", rx[0], rx[1], (unsigned long)cfg, d, idle);
+	ESP_LOGW(XTAG, "link diag: drive=%s idle(SS CLK MOSI MISO DBG RST)=%s", d, idle);
 }
 
 static uint16_t xbox_nand_get_status(void)

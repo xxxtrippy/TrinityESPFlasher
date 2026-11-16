@@ -18,6 +18,10 @@
  */
 
 #define SD_MOUNT_POINT "/sd"
+
+/* After a failed sd_mount(): true if a card answered but is not FAT32. */
+bool sd_card_seen_but_unreadable(void);
+int sd_last_error(void);   /* esp_err_t of the last failed mount */
 #define XEBUILD_DATA_ROOT SD_MOUNT_POINT "/xebuild/data"
 
 /* Mount the card (SDMMC 1-bit). Returns true on success. */

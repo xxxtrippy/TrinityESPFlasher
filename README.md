@@ -16,9 +16,9 @@ touch screen, but the touch screen is the primary interface and works with no
 network at all.
 
 > **Status: work in progress. Read [Project status](#project-status) and
-> [Known issues](#known-issues) before flashing anything.** The image build is
-> wired end-to-end but deliberately gated off until it is verified on real
-> hardware, so the firmware refuses to flash an unverified image.
+> [Known issues](#known-issues) before flashing anything.** The image builder
+> is verified on a PC against real J-Runner images, but the console link on the
+> built hardware does not work yet.
 
 ---
 
@@ -28,14 +28,14 @@ network at all.
   console info line, progress bar, and a hint line telling you the next step.
 - **Detect**: stops the SMC and reads the NAND flash config to confirm wiring.
 - **Dump**: reads the whole NAND twice and compares the two reads.
-- **Build**: assembles an RGH image from your dump, your CPU key, and the
-  xeBuild data package on the SD card (gated, see below).
-- **Flash**: writes a built image back to the NAND (only if the build passed
-  its verification gates).
+- **Build**: re-targets a finished RGH3 image on the SD card (`RGH3BASE.BIN`)
+  at the console you dumped: its KeyVault, SMC config and per-console files.
+- **Flash**: writes the built image and reads it back to verify (only if the
+  build passed its self-check).
 - **Optional WiFi web UI**: the same Detect / Dump / Build / Flash flow from a
   browser, with live progress. Joins your network, or falls back to its own
   access point.
-- **microSD support** for the xeBuild data package and your CPU key.
+- **microSD** holds the base image, your CPU key, the dump and the built image.
 
 ---
 
@@ -120,27 +120,33 @@ taps land off-target on your panel.
 Format the card **FAT32** and put this on it:
 
 ```
-/cpukey.txt              <- your CPU key (first 32 hex characters are used)
-/xebuild/data/
-    cb.bin               required
-    cbb.bin              required
-    cd.bin               required
-    ce.bin               required
-    patches.bin          required
-    smc.bin              required
-    smc_config.bin       optional
-    xell-reloaded.bin    optional (first-boot CPU key reader)
+/RGH3BASE.BIN            required for BLD: a finished RGH3 image (see below)
+/cpukey.txt              recommended: the target console's CPU key
+/xell/TRINITY_RGH3.ecc   required for XEL only (from J-Runner common/xell-images/glitch2)
+/xell/xell-gggggg.bin    optional for XEL: newer XeLL (from J-Runner xeBuild/data)
 ```
 
-- **`cpukey.txt`**: extra text around the key is fine; the firmware picks out
-  the first 32 hex characters. On a first RGH install the CPU key is read off
-  the glitched console by xeLL. It **cannot be computed from a NAND dump** (that
-  is the 360's security model, and J-Runner needs it too).
-- **`xebuild/data/`**: the patched building blocks for your target dashboard.
-  These are Microsoft-derived and **are not distributed here**. They are the
-  same files your J-Runner-With-Extras `data/` folder uses. If your filenames
-  differ, rename them to match the list above or edit the ingredient table in
-  [`main/build_image.c`](main/build_image.c).
+- **`RGH3BASE.BIN`** is the image the builder re-targets. Take the
+  `updflash.bin` that J-Runner built for a Trinity with the patch set you want
+  (16 MB, 17,301,504 bytes) and copy it to the card under this name. It is
+  Microsoft-derived and holds a KeyVault, so it is **not distributed here** and
+  should not be shared. Every image the tool builds has that same dashboard
+  version and patch set.
+- **`cpukey.txt`**: the *target* console's key; extra text around it is fine,
+  the first 32 hex characters are used. With it, the builder refuses a dump
+  whose KeyVault the key cannot authenticate, and can regenerate
+  `secdata.bin`/`extended.bin`. Without it the KeyVault is copied unchecked.
+  The key **cannot be computed from a NAND dump**; XEL + KEY read it off the
+  console.
+
+The tool writes `NANDDUMP.BIN`, `BACKUP.BIN` (two copies of the verified dump),
+`IMAGE.BIN` (the built image) and `XELL.ECC` to the card root. Keep the dumps.
+
+**Build self-test:** copy a NAND read of the console to the card as both
+`NANDDUMP.BIN` and `BACKUP.BIN`, and the image you expect (made on a PC with
+[`tools/host_build.c`](tools/host_build.c)) as `REFIMG.BIN`. BLD then ends with
+**Image = REFIMG** if the device built it byte for byte. Delete `REFIMG.BIN`
+afterwards; while it is on the card any build that differs from it is refused.
 
 ---
 
@@ -150,8 +156,7 @@ You do this once, to put the tool onto the ESP32.
 
 ### ESP-IDF (recommended)
 
-Install **ESP-IDF v5.5.x** (the included build output was generated with
-v5.5.5). On Windows use the
+Install **ESP-IDF v5.3.x** (the firmware is built and tested against v5.3.1). On Windows use the
 [ESP-IDF Windows Installer](https://dl.espressif.com/dl/esp-idf/) and open the
 **ESP-IDF PowerShell** shortcut it creates. On Linux/macOS run `./install.sh
 esp32s3` and `. ./export.sh` in your ESP-IDF checkout.
@@ -214,7 +219,7 @@ There is no authentication. Only run it on a network you trust.
 
 ## Using it
 
-1. Put `cpukey.txt` and `xebuild/data/` on the microSD card and insert it.
+1. Put `RGH3BASE.BIN` (and `cpukey.txt`) on the microSD card and insert it.
 2. Power the console to **standby** (the ESP can run from the console's 3.3 V
    standby rail or from its own USB; grounds must be common).
 3. Tap through the buttons on the screen:
@@ -223,8 +228,10 @@ There is no authentication. Only run it on a network you trust.
 |---|---|
 | **FND** | Find/detect: stops the SMC and reads the flash config. The info line shows `cfg 0x........` on success, or `console: not detected`. |
 | **DMP** | Dump: reads the NAND twice and compares. Ends green on a match, red with `reads differ - check wiring` on a mismatch. |
-| **BLD** | Build: loads your CPU key from the SD card, checks the data package, and assembles the image. |
-| **FLSH** | Flash: writes a built image back. Reports `no verified image` and does nothing unless a build passed verification. |
+| **XEL** | Stock console only: writes an RGH3 XeLL image with this console's KeyVault so it boots XeLL. |
+| **KEY** | Stock console only: reads the CPU key from XeLL over WiFi into `cpukey.txt`. |
+| **BLD** | Build: checks the dump and `RGH3BASE.BIN`, authenticates the KeyVault with the CPU key if there is one, and writes `IMAGE.BIN`. Needs only the SD card, so it works without a console link once `NANDDUMP.BIN` + `BACKUP.BIN` are on the card. |
+| **FLSH** | Flash: writes `IMAGE.BIN` and reads it back. Does nothing unless a build passed its self-check. |
 
 
 <p align="center">
@@ -240,44 +247,56 @@ using `cpukey.txt`.
 
 | Part | State |
 |---|---|
-| SB SPI register protocol (`spiex.c`) | Ported from proven PicoFlasher/espflasher values. |
-| NAND read / erase / write sequences (`xbox.c`) | Ported from proven values. |
-| SMC stop/start timing | Ported from proven values. |
-| Detect (SMC stop + flash config) | Implemented. |
-| Two-pass dump + compare | Implemented, but see [Known issues](#known-issues). |
-| Touch UI (ILI9341 + XPT2046) | Implemented. |
-| microSD data-package and CPU-key loader | Implemented. |
-| WiFi + web UI | Implemented. |
-| NAND spare **ECC** generation (`nand_ecc.c`) | Reconstructed, **not verified. Gated off.** |
-| Keyvault decrypt / bootloader crypto chain | Staged, **not implemented or verified. Gated off.** |
-| **Build a flashable image** | Runs end-to-end but returns `NOT_VERIFIED`; flashing a built image is blocked. |
+| Image builder (`build_image.c`, `flashfs.c`) | **Host-verified against real J-Runner images** (`tools/test_build_image.c`) with two different bases (plain XL HDD and one with extra kernel patches): rebuilding an image from itself is byte-identical; a re-target from a NAND read-back changes only per-console pages. Not yet booted on a second console. |
+| NAND spare **ECC** (`nand_ecc.c`) | **Verified**: all 32768 pages of real 16 MB images. |
+| KeyVault / `secdata.bin` / `extended.bin` crypto | **Verified** against real files and their CPU key. |
+| SB SPI register protocol (`spiex.c`), NAND read/erase/write (`xbox.c`), SMC stop/start | Ported from PicoFlasher. **Not working on the bench yet** — see Known issues. |
+| Detect, streamed two-pass dump to SD, flash + read-back verify | Implemented; blocked by the link problem above. |
+| XEL (write RGH3 XeLL) and KEY (CPU key over WiFi) | Implemented, not bench-tested. |
+| Touch UI, microSD, WiFi + web UI | Implemented. |
 
-The two gates are `BUILD_ECC_VERIFIED` and `BUILD_CRYPTO_VERIFIED` in
-[`main/build_image.c`](main/build_image.c). Both are `0`. They should only be
-set to `1` after this tool's output has been checked **byte-for-byte against a
-known-good J-Runner build** on the bench. Until then the Flash button refuses a
-built image. "It compiles" and "it is safe to flash" are deliberately separate
-claims.
+How the builder works and what is per-console: [`RGH3_BUILD_MODEL.md`](RGH3_BUILD_MODEL.md).
 
 ---
 
 ## Known issues
 
-- **Dump needs more RAM than the N16R8 has.** A raw Trinity dump is
-  `0x8000` pages x `0x210` bytes = 17,301,504 bytes (about 16.5 MiB). The dump
-  job currently asks for **two** such buffers in PSRAM (one per read pass) and
-  the build job asks for another, but the N16R8 only has 8 MB of PSRAM, so the
-  allocation fails and Dump reports `out of PSRAM`. The two-pass compare and the
-  build both need to be reworked to stream through the SD card in chunks.
-- **Nothing is saved to SD yet.** Dumps live in RAM only, so there is no
-  on-card backup of your NAND.
-- **Flash has no read-back verification yet.** It writes the pages and reports
-  `flash complete`.
-- **Web UI "Download dump.bin" is a dead link.** The button points at
-  `/dump.bin`, which the server doesn't serve.
-- **Build is a placeholder past the data-plumbing stages.** Keyvault decrypt,
-  bootloader re-encryption, hash chaining, and final ECC regeneration are not
-  implemented; the output is not bootable and is never marked flashable.
+- **The console link is not working yet.** On the built unit, FND reads flash
+  config `0x00000000` where PicoFlasher on the same console reads
+  `0x00023010`. The register protocol and the SMC handshake match PicoFlasher,
+  so the cause is likely electrical. FND now holds CLK/MOSI low during the
+  handshake, re-arms SS as an output, and retries three times with a slower
+  clock each time. When it still fails the info line shows
+  `nolink AABB CCCCCCCC w=SCOIDR D?R?`:
+  - `AABB` is what MISO showed while the command was sent and `CCCCCCCC` the
+    value read. `0000 00000000` or `FFFF FFFFFFFF` means nothing answered.
+  - `w=` is each wire released and probed in the order SS, CLK, MOSI, MISO,
+    DBG_EN, RST: `F` floats (not connected, or the far end is hi-Z), `L` held
+    low, `H` held high by the console. The SMC reset line has a pull-up on the
+    console, so the last letter should be `H`; an `F` there means the RST wire
+    does not reach the board.
+  - `D1R1` are the DBG_EN / RST pads read back while driven; a `0` means that
+    pad is being pulled low externally.
+
+  The hint line under the progress bar shows the SD card state (`SD: no card
+  found`, `SD: not FAT32 (exFAT?) - reformat`, `SD ok - no NANDDUMP.BIN on it`,
+  `SD: dump ready`, ...), and the bottom line shows the firmware tag.
+
+  Two quick tests split the problem in half:
+  1. **ESP side (console unplugged):** jumper GPIO11 (MOSI) to GPIO13 (MISO) and
+     tap FND. `loopback OK: ESP pins work` proves the ESP drives and reads the
+     bus correctly.
+  2. **SMC halt (console in standby, wired):** tap FND, then press the console's
+     power button. A halted SMC ignores the button. If the console powers on,
+     the handshake did not take: look at the DBG_EN, RST and SS wires. If it
+     stays off, the SMC is halted and the fault is on CLK, MOSI or MISO.
+- **Bad blocks are not handled.** The builder refuses a dump whose KeyVault or
+  config blocks are remapped, and Flash stops on the first write error. Use
+  J-Runner for a console with bad blocks.
+- **Re-targeting at another console is untested on hardware.** If that
+  console's dump has no `crl.bin`/`dae.bin`/`fcrt.bin`, the base's copies stay
+  in the image.
+- **One dashboard/patch set per card**: whatever `RGH3BASE.BIN` was built with.
 - **WiFi credentials are hardcoded** in `main/wifi.c`; set your own and keep
   them out of commits.
 
@@ -285,8 +304,6 @@ claims.
 
 ## Safety
 
-- Until the build pipeline is verified, treat this as a **dumper and detector**
-  and build/flash your image in J-Runner from your own dump.
 - Keep your first dump. It holds your keyvault and is the only way back if
   something goes wrong.
 - Dump twice and compare. A single bad bit in a NAND image matters.
@@ -303,8 +320,10 @@ claims.
 | `main/ui.c` | Touch UI layout, drawing, and button handling |
 | `main/jobs.c` | Shared worker for dump / build / flash and CPU-key loading |
 | `main/xbox.c`, `main/spiex.c` | Xbox southbridge SPI and NAND access |
-| `main/build_image.c` | Image build pipeline and the two verification gates |
+| `main/build_image.c` | Image builder and its self-check |
+| `main/flashfs.c` | Read-only NAND filesystem access (finds per-console files in a dump) |
 | `main/nand_ecc.c`, `main/xenon_keys.c`, `main/nand_geom.h` | ECC, key/secret extraction, NAND geometry |
+| `tools/test_build_image.c`, `tools/host_build.c` | PC test of the builder against your own J-Runner files; the builder as a PC command |
 | `main/lcd.c`, `main/touch.c`, `main/softspi.c`, `main/font8x8.h` | Display, touch, and the bit-banged SPI bus |
 | `main/sdcard.c`, `main/board_spi.c` | microSD mount and the SD SPI bus |
 | `main/wifi.c`, `main/web_server.c`, `main/web_index.h` | Optional WiFi and web UI |
@@ -322,3 +341,25 @@ protocol and NAND command sequences are derived from
 [GxOSS/espflasher](https://github.com/GxOSS/espflasher) and
 [balika011/PicoFlasher](https://github.com/balika011/PicoFlasher). The xeBuild
 data package is not included and must be supplied by the user.
+
+## USB-host mode: drive a PicoFlasher over USB-C (fw 1116u+)
+
+Instead of wiring the ESP's own six SB lines to the console, the ESP32-S3 can be
+a **USB host** and drive a PicoFlasher that is already hard-wired to the Xbox.
+The PicoFlasher does all the SB timing; the ESP just sends it the same commands
+J-Runner would. This removes the fragile SB connection entirely.
+
+**Wiring:** ESP32-S3 native USB-C port → USB-OTG cable → PicoFlasher's USB-C.
+The ESP must power the PicoFlasher, and most S3 boards do not output 5 V on the
+OTG port, so use an OTG cable that also takes external 5 V (or a powered hub) and
+feed it from a phone charger. Flash the ESP firmware over the **other** USB-C
+port (the UART/COM one), since the native port is now the host.
+
+**Use:** with the PicoFlasher plugged in, the info line shows
+`USB: PicoFlasher v3` once it enumerates. Tap **FND**: the ESP asks the
+PicoFlasher for the flash config, so a good link shows `cfg 0x00023010`. DMP,
+BLD and FLSH then run through the PicoFlasher automatically. If no PicoFlasher is
+present, FND falls back to the ESP's direct SB wiring as before.
+
+Code: `main/picolink.c` (raw USB-host CDC client) and the `s_use_pico` backend
+switch in `main/jobs.c`.

@@ -62,6 +62,8 @@
 
 #define N_BTNS 6
 
+#define FW_TAG "fw 1116u"   /* shown bottom right: which build is on the chip */
+
 typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED, BS_DISABLED } btn_state_t;
 
 typedef struct {
@@ -98,7 +100,7 @@ static bool btn_enabled(int i)
         case 0: return true;                                /* FND  */
         case 1: return s_console_ready;                     /* DMP  */
         case 2: return s_console_ready && s_have_dump;      /* XEL  */
-        case 3: return s_console_ready && s_have_dump;      /* BLD  */
+        case 3: return true;                                /* BLD: SD card only; says what is missing */
         case 4: return true;                                /* KEY: WiFi, console in XeLL */
         case 5: return s_console_ready && s_flashable;      /* FLSH */
     }
@@ -265,7 +267,7 @@ static void draw_bar(int pct, uint16_t col, bool full)
 
 static char s_last_stage[48];
 static char s_last_info[48];
-static char s_last_hint[32];
+static char s_last_hint[40];
 
 static uint16_t s_last_scol;
 static uint16_t s_last_bar_col;
@@ -293,7 +295,7 @@ static void draw_static(void)
     draw_desc();
 
     text_c(0, LCD_W, 228,
-           "SELECT: run    RIGHT: next",
+           "SELECT: run  RIGHT: next  " FW_TAG,
            COL_DIM, COL_BG, 1);
 
     /* Force next status update to repaint */
@@ -379,8 +381,8 @@ static void draw_status(const job_status_t *s)
                  (unsigned long)s->flash_config,
                  s->have_dump ? "yes" : "no");
     } else {
-        snprintf(info, sizeof(info),
-                 "console: not detected");
+        snprintf(info, sizeof(info), "%s",
+                 s->diag[0] ? s->diag : "console: not detected");
     }
 
     if (strcmp(info, s_last_info) != 0) {
@@ -418,8 +420,8 @@ static void draw_status(const job_status_t *s)
     const char *hint = s->flashable
                      ? "image ready - select FLSH"
                      : (s->have_dump
-                        ? "dump saved - XEL, then BLD"
-                        : "select FND, then DMP");
+                        ? "dump ready - BLD (XEL if stock)"
+                        : (s->sd[0] ? s->sd : "select FND, then DMP"));
 
     if (strcmp(hint, s_last_hint) != 0) {
         lcd_fill_rect(CARD_X + 2, 120,
@@ -526,8 +528,9 @@ static void run_selected(void)
         job_status_t current;
         jobs_get(&current);
 
-        if (!current.linked) {
-            /* Safety: never start DMP/BLD/FLSH before successful FND. */
+        if (!current.linked && b->job != JOB_BUILD && b->job != JOB_GETKEY) {
+            /* Safety: never start DMP/XEL/FLSH before a successful FND.
+             * BLD only uses the SD card; KEY talks to XeLL over WiFi. */
             return;
         }
 

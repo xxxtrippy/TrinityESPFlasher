@@ -10,6 +10,7 @@
  */
 #include "kuart.h"
 #include "usbpf.h"
+#include "picolink.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -53,7 +54,12 @@ void app_main(void)
 
     xbox_init();
     kuart_start();
-    usbpf_start();
+    /* USB-C OTG port runs in HOST mode to drive a PicoFlasher. This takes over
+     * the OTG peripheral, so the old TinyUSB device bridge (usbpf) is not
+     * started; flash the firmware over the UART/COM port instead. */
+    if (!picolink_start()) {
+        ESP_LOGW(TAG, "USB host did not start; direct SB wiring only");
+    }
     jobs_init();
     ui_start();
 

@@ -23,6 +23,8 @@
 
 #include "nand_geom.h"
 #include "xbox.h"
+#include "spiex.h"
+#include "picolink.h"
 #include "sdcard.h"
 #include "build_image.h"
 #include "rgb.h"
@@ -31,6 +33,24 @@
 #include "xellnet.h"
 
 static const char *TAG = "jobs";
+
+/* Which transport reaches the console: the ESP's own SB wiring, or a
+ * PicoFlasher over USB. Chosen fresh at every detect. */
+static bool s_use_pico = false;
+
+/* buf must be a contiguous 0x210 region (data then spare), which every caller
+ * here already passes as (page, page + NAND_PAGE_DATA). */
+static int link_read_block(uint32_t lba, uint8_t *buf, uint8_t *spare)
+{
+    if (s_use_pico) return picolink_read_block(lba, buf);
+    return xbox_nand_read_block(lba, buf, spare);
+}
+static int link_write_block(uint32_t lba, uint8_t *buf, uint8_t *spare)
+{
+    if (s_use_pico) return picolink_write_block(lba, buf);
+    return xbox_nand_write_block(lba, buf, spare);
+}
+
 
 #define DUMP_FILE   SD_MOUNT_POINT "/NANDDUMP.BIN" /* last verified dump   */
 #define BACKUP_FILE SD_MOUNT_POINT "/BACKUP.BIN"   /* 2nd copy of the dump */
@@ -57,6 +77,8 @@ static struct {
 
     uint32_t flash_config;
     bool     linked;
+    char     diag[40];
+    char     sd[36];
 } S;
 
 static void st(int pct, const char *stage, bool done, bool ok)
@@ -83,7 +105,7 @@ static bool dump_once(const char *path, int pct0, int span, const char *stage)
 
     for (uint32_t p = 0; ok && p < pages; p++) {
         uint8_t *page = buf + (size_t)n * NAND_PAGE_RAW;
-        uint32_t ret = xbox_nand_read_block(p, page, page + NAND_PAGE_DATA);
+        uint32_t ret = link_read_block(p, page, page + NAND_PAGE_DATA);
         if (ret != 0) {
             ESP_LOGE(TAG, "read error at page %lu: 0x%lx",
                      (unsigned long)p, (unsigned long)ret);
@@ -143,6 +165,44 @@ static bool backup_ok(void)
     return files_equal(DUMP_FILE, BACKUP_FILE) == 1;
 }
 
+static void set_sd(const char *txt, bool have_dump)
+{
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    snprintf(S.sd, sizeof(S.sd), "%s", txt);
+    S.have_dump = have_dump;
+    xSemaphoreGive(S.lock);
+}
+
+/* Is there a usable dump (NANDDUMP.BIN + identical BACKUP.BIN) on the card?
+ * Updates S.have_dump and the SD status line. Reading both 16.5 MB files takes
+ * a while, so the line says what is going on. */
+static void check_dump_on_sd(void)
+{
+    struct stat a, b;
+
+    if (!sd_is_mounted() && !sd_mount()) {
+        if (sd_card_seen_but_unreadable()) {
+            set_sd("SD: not FAT32 (exFAT?) - reformat", false);
+        } else {
+            /* 107 = no answer at all, 108/109 = garbled answer (wiring/power) */
+            char t[36];
+            snprintf(t, sizeof(t), "SD: card not answering (err %X)", (unsigned)sd_last_error());
+            set_sd(t, false);
+        }
+        return;
+    }
+    if (stat(DUMP_FILE, &a) != 0)   { set_sd("SD ok - no NANDDUMP.BIN on it", false); return; }
+    if (stat(BACKUP_FILE, &b) != 0) { set_sd("SD ok - no BACKUP.BIN on it", false); return; }
+    if ((uint32_t)a.st_size != NAND_16MB_RAW_BYTES ||
+        (uint32_t)b.st_size != NAND_16MB_RAW_BYTES) {
+        set_sd("SD: dump file has the wrong size", false);
+        return;
+    }
+    set_sd("SD: checking the dump (30 s)...", false);
+    if (backup_ok()) set_sd("SD: dump ready", true);
+    else             set_sd("SD: BACKUP.BIN differs from dump", false);
+}
+
 static void job_dump(void)
 {
     static const char *const tmp[DUMP_PASSES] = {
@@ -164,7 +224,7 @@ static void job_dump(void)
     }
 
     memset(probe, 0xA5, sizeof(probe));
-    if (xbox_nand_read_block(0, probe, probe + NAND_PAGE_DATA) != 0 ||
+    if (link_read_block(0, probe, probe + NAND_PAGE_DATA) != 0 ||
         probe[0] != 0xFF || probe[1] != 0x4F) {
         /* 360 NAND header magic */
         ESP_LOGW(TAG, "page 0 has no 360 header (got %02x %02x)",
@@ -221,9 +281,7 @@ static void job_dump(void)
         goto done;
     }
 
-    xSemaphoreTake(S.lock, portMAX_DELAY);
-    S.have_dump = true;
-    xSemaphoreGive(S.lock);
+    set_sd("SD: dump ready", true);
 
     st(100, "Dump verified", true, true);
 
@@ -252,8 +310,13 @@ static void job_build(void)
     const uint8_t *cpu_key_p = NULL;
 
     if (!S.have_dump) {
-        st(0, "Dump first", true, false);
-        return;
+        /* Card or files may have been added since power-up: look again. */
+        st(1, "Checking SD card", false, false);
+        check_dump_on_sd();
+        if (!S.have_dump) {
+            st(0, sd_is_mounted() ? "No dump on SD" : "No SD card", true, false);
+            return;
+        }
     }
 
     st(1, "Checking backup", false, false);
@@ -262,21 +325,23 @@ static void job_build(void)
         return;
     }
 
-    /* The CPU key is NOT required: the RGH3 chain is console-independent and the
-     * KeyVault is copied verbatim from the dump, so no key is needed to build.
-     * Pass it through only if a valid cpukey.txt happens to be present. */
+    /* The CPU key is optional. With it the builder authenticates the dump's
+     * KeyVault before writing anything (catches a wrong key or a bad dump) and
+     * can regenerate secdata.bin / extended.bin if the dump lacks them. */
     if (hex2bin(S.cpu_key_hex, cpu_key, 16) == 0) {
         cpu_key_p = cpu_key;
     }
 
     S.flashable = false;
     build_progress_t bp = { 0 };
-    build_status_t bs = build_rgh_image(DUMP_FILE, cpu_key_p,
-                                        IMAGE_FILE, &bp);
+    build_report_t rep = { 0 };
+    build_status_t bs = build_rgh_image_ex(DUMP_FILE, cpu_key_p,
+                                           IMAGE_FILE, &bp, &rep);
 
     if (bs == BUILD_OK) {
         S.flashable = true;
-        st(100, "Image verified", true, true);
+        /* REFIMG.BIN on the card and byte-identical: say so (bench self-test). */
+        st(100, rep.ref_matched ? "Image = REFIMG" : "Image verified", true, true);
     } else {
         st(bp.percent, build_status_str(bs), true, false);
     }
@@ -319,7 +384,7 @@ static bool verify_flash(uint32_t pages)
 
         for (uint32_t i = 0; i < n; i++) {
             uint8_t *page = got + (size_t)i * NAND_PAGE_RAW;
-            if (xbox_nand_read_block(lba + i, page,
+            if (link_read_block(lba + i, page,
                                      page + NAND_PAGE_DATA) != 0) {
                 ok = false;
                 break;
@@ -483,7 +548,7 @@ static void job_xell(void)
     /* 4. write + verify */
     for (uint32_t p = 0; p < XELL_PAGES; p++) {
         uint8_t *pg = img + (size_t)p * NAND_PAGE_RAW;
-        if (xbox_nand_write_block(p, pg, pg + NAND_PAGE_DATA) != 0) {
+        if (link_write_block(p, pg, pg + NAND_PAGE_DATA) != 0) {
             free(img); st(0, "Write error", true, false); return;
         }
         if ((p & 0x7F) == 0) st(10 + (int)(p * 60 / XELL_PAGES), "Writing XeLL", false, false);
@@ -491,7 +556,7 @@ static void job_xell(void)
     rgb_verifying();
     uint8_t got[NAND_PAGE_RAW];
     for (uint32_t p = 0; p < XELL_PAGES; p++) {
-        if (xbox_nand_read_block(p, got, got + NAND_PAGE_DATA) != 0 ||
+        if (link_read_block(p, got, got + NAND_PAGE_DATA) != 0 ||
             memcmp(got, img + (size_t)p * NAND_PAGE_RAW, NAND_PAGE_RAW) != 0) {
             ESP_LOGE(TAG, "XeLL verify mismatch at page %lu", (unsigned long)p);
             free(img); st(0, "Verify failed", true, false); return;
@@ -553,7 +618,7 @@ static void job_flash(void)
         for (uint32_t i = 0; i < n && lba < pages; i++, lba++) {
             uint8_t *page = buf + (size_t)i * NAND_PAGE_RAW;
 
-            if (xbox_nand_write_block(lba, page,
+            if (link_write_block(lba, page,
                                       page + NAND_PAGE_DATA) != 0) {
                 ok = false;
                 break;
@@ -601,25 +666,13 @@ static void worker_task(void *arg)
     vTaskPrioritySet(NULL, 1);
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    /* Give the SD card up to 5 seconds to mount. */
-    for (int i = 0; i < 20 && !sd_is_mounted(); i++) {
-        vTaskDelay(pdMS_TO_TICKS(250));
+    /* The mount in app_main() can fail on a slow card: retry a few times. */
+    set_sd("SD: looking for the card...", false);
+    for (int i = 0; i < 6 && !sd_is_mounted(); i++) {
+        if (sd_mount()) break;
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
-
-    bool valid_dump = false;
-    struct stat dump_sb, backup_sb;
-
-    if (sd_is_mounted() &&
-        stat(DUMP_FILE, &dump_sb) == 0 &&
-        stat(BACKUP_FILE, &backup_sb) == 0 &&
-        (uint32_t)dump_sb.st_size == NAND_16MB_RAW_BYTES &&
-        (uint32_t)backup_sb.st_size == NAND_16MB_RAW_BYTES) {
-        valid_dump = backup_ok();
-    }
-
-    xSemaphoreTake(S.lock, portMAX_DELAY);
-    S.have_dump = valid_dump;
-    xSemaphoreGive(S.lock);
+    check_dump_on_sd();
 
     /* Restore normal worker priority after validation. */
     vTaskPrioritySet(NULL, 5);
@@ -695,7 +748,7 @@ void jobs_init(void)
     strcpy(S.stage, "idle");
 
     /* Validation now happens inside worker_task, after startup. */
-    xTaskCreate(worker_task, "jobs", 8192, NULL, 5, NULL);
+    xTaskCreate(worker_task, "jobs", 12288, NULL, 5, NULL);
 }
 
 bool jobs_start(job_t job)
@@ -706,7 +759,8 @@ bool jobs_start(job_t job)
 
     /* JOB_GETKEY is a pure-WiFi capture from a console booted into XeLL, so it
      * does NOT require the SMC-stopped link the NAND jobs need. */
-    if (!S.busy && (job == JOB_NONE || job == JOB_GETKEY || S.linked)) {
+    /* BUILD only reads and writes the SD card, so it needs no console link. */
+    if (!S.busy && (job == JOB_NONE || job == JOB_GETKEY || job == JOB_BUILD || S.linked)) {
         S.busy = true;
         S.job = job;
         S.done = false;
@@ -765,6 +819,13 @@ void jobs_get(job_status_t *out)
     out->have_dump = S.have_dump;
     out->flash_config = S.flash_config;
     out->linked = S.linked;
+    memcpy(out->diag, S.diag, sizeof(out->diag));
+    memcpy(out->sd, S.sd, sizeof(out->sd));
+    /* Before a detect, show that the PicoFlasher link is up, so the OTG cable
+     * and its power can be confirmed without the console attached. */
+    if (!out->linked && out->diag[0] == '\0' && picolink_present()) {
+        snprintf(out->diag, sizeof(out->diag), "%s", picolink_status());
+    }
 
     xSemaphoreGive(S.lock);
 }
@@ -816,21 +877,79 @@ bool jobs_load_cpukey_from_sd(void)
 
 void jobs_detect(void)
 {
-    xbox_stop_smc();                      /* only toggles pins: always "succeeds" */
-    uint32_t fc = xbox_get_flash_config();
+    char diag[40] = "";
 
-    /* 0 / all-ones = nothing answered; 0xC0462002 = eMMC console (Corona 4GB),
-     * which this firmware cannot dump or flash. */
-    bool plausible = (fc != 0 &&
-                      fc != 0xFFFFFFFFu &&
-                      fc != 0xC0462002u);
+    /* Preferred path: a PicoFlasher on the USB-C OTG port. It halts the SMC and
+     * does all the SB timing itself, so we just ask it for the flash config. */
+    s_use_pico = picolink_present();
+    if (s_use_pico) {
+        uint32_t fc = 0;
+        bool ok = picolink_get_flash_config(&fc) &&
+                  fc != 0 && fc != 0xFFFFFFFFu && fc != 0xC0462002u;
+        if (!ok) snprintf(diag, sizeof(diag), "%s", picolink_status());
+        xSemaphoreTake(S.lock, portMAX_DELAY);
+        memcpy(S.diag, diag, sizeof(S.diag));
+        S.flash_config = ok ? fc : 0;
+        S.linked = ok;
+        xSemaphoreGive(S.lock);
+        if (ok || fc == 0xC0462002u) {
+            if (fc == 0xC0462002u) {
+                xSemaphoreTake(S.lock, portMAX_DELAY);
+                snprintf(S.diag, sizeof(S.diag), "eMMC console: not supported");
+                S.linked = false; S.flash_config = 0;
+                xSemaphoreGive(S.lock);
+            }
+            return;
+        }
+        /* PicoFlasher present but no console answer: fall through to direct. */
+        s_use_pico = false;
+    }
+
+    /* Up to three tries, each a full SMC-stop handshake, with a slower SPI
+     * clock every time (half period 1, 5, 20 us). 0 / all-ones = nothing
+     * answered; 0xC0462002 = eMMC console (Corona 4GB), which this firmware
+     * cannot dump or flash. */
+    static const int half_us[] = { 1, 5, 20 };
+    uint32_t fc = 0;
+    bool plausible = false;
+    int used = 1;
+
+    for (int i = 0; i < 3 && !plausible; i++) {
+        used = half_us[i];
+        spiex_set_half_us(used);
+        xbox_stop_smc();                  /* only toggles pins: always "succeeds" */
+        fc = xbox_get_flash_config();
+        if (fc == 0xC0462002u) break;
+        /* A real answer is stable: the same value twice in a row. */
+        plausible = (fc != 0 && fc != 0xFFFFFFFFu && fc == xbox_get_flash_config());
+        if (!plausible) {
+            ESP_LOGW(TAG, "detect try %d (half %d us): 0x%08lx", i + 1, used, (unsigned long)fc);
+        }
+    }
+    if (!plausible) {
+        spiex_set_half_us(1);
+    } else if (used == 1) {
+        /* Linked at the default clock: use the fastest bit-bang (no delay,
+         * roughly 4x quicker dumps) if 16 reads in a row still agree. */
+        bool fast_ok = true;
+        spiex_set_half_us(0);
+        for (int i = 0; i < 16 && fast_ok; i++) fast_ok = (xbox_get_flash_config() == fc);
+        if (!fast_ok) {
+            spiex_set_half_us(1);
+            (void)xbox_get_flash_config();
+        }
+        ESP_LOGI(TAG, "SPI clock: %s", fast_ok ? "fast" : "normal");
+    }
 
     if (!plausible) {
         ESP_LOGW(TAG, "no usable flash config (0x%08lx)",
                  (unsigned long)fc);
+        if (fc == 0xC0462002u) snprintf(diag, sizeof(diag), "eMMC console: not supported");
+        else                   xbox_link_diag(diag, sizeof(diag));
     }
 
     xSemaphoreTake(S.lock, portMAX_DELAY);
+    memcpy(S.diag, diag, sizeof(S.diag));
     S.flash_config = plausible ? fc : 0;
     S.linked = plausible && xbox_smc_stopped;
     xSemaphoreGive(S.lock);

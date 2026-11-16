@@ -22,6 +22,8 @@ typedef struct {
     bool  have_dump;
     uint32_t flash_config;
     bool  linked;     /* SMC stopped / console reachable */
+    char  diag[40];   /* why the last detect failed ("" if it worked or never ran) */
+    char  sd[36];     /* SD card / dump state, one line for the screen */
 } job_status_t;
 
 void jobs_init(void);

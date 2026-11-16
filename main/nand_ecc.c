@@ -4,13 +4,18 @@
  * GPL-3.0. See LICENSE.
  *
  * The ECC is a 26-bit linear feedback over the first 0x1066 bits of the
- * 0x210-byte page (data, the 12 metadata bytes, and the first 6 bits of the
- * ECC word, which is treated as zero), polynomial 0x6954559. The result is
- * inverted and shifted left by 6, then stored little endian at page offset
- * 0x20C.
+ * 0x210-byte page: the data, the 12 metadata bytes, and the low 6 bits of the
+ * byte at 0x20C. Those 6 bits are NOT ECC: they are the FsBlockType field
+ * (0x30 = filesystem root, 0x31.. = mobile data, 0 everywhere else), so they
+ * are an input to the ECC and must be preserved when the ECC is rewritten.
+ * Polynomial 0x6954559. The result is inverted and shifted left by 6, then
+ * stored little endian at page offset 0x20C above the 6 type bits.
  *
- * Checked against J-Runner's Trinity images: every page of TRINITY.ecc,
- * TRINITY_RGH3.ecc and TRINITY_CR4.ecc reproduces its stored ECC word.
+ * Checked against full 16 MB xeBuild/J-Runner Trinity images (updflash.bin and
+ * a NAND read-back): all 32768 pages reproduce their stored ECC word, including
+ * the filesystem-root and mobile blocks where the type bits are non-zero.
+ * (An earlier version treated the 6 bits as zero; that was only right for the
+ * bootloader area and produced a wrong ECC on every filesystem-root page.)
  */
 #include "nand_ecc.h"
 
@@ -33,8 +38,9 @@ uint32_t nand_ecc_calc(const uint8_t page[0x210])
     for (uint32_t i = 0; i < 0x1066; i++) {
         if (!(i & 31)) {
             uint32_t off = (i >> 5) * 4;
-            /* the ECC word itself counts as zero */
-            v = ~((off < ECC_OFFSET) ? rd32le(page + off) : 0u);
+            /* only the 6 FsBlockType bits of the last word take part */
+            v = ~((off < ECC_OFFSET) ? rd32le(page + off)
+                                     : (rd32le(page + off) & 0x3Fu));
         }
         val ^= v & 1;
         v >>= 1;
@@ -45,9 +51,23 @@ uint32_t nand_ecc_calc(const uint8_t page[0x210])
     return val << 6;
 }
 
+bool nand_page_is_blank(const uint8_t page[0x210])
+{
+    for (uint32_t i = 0; i < NAND_PAGE_RAW; i++)
+        if (page[i] != 0xFF) return false;
+    return true;
+}
+
+bool nand_ecc_page_ok(const uint8_t page[0x210])
+{
+    if (nand_page_is_blank(page)) return true;       /* erased: no ECC yet */
+    return (nand_ecc_calc(page) & ~0x3Fu) == (rd32le(page + ECC_OFFSET) & ~0x3Fu);
+}
+
 void nand_ecc_fix_page(uint8_t page[0x210])
 {
-    uint32_t e = nand_ecc_calc(page);
+    /* keep the 6 FsBlockType bits that share the byte at 0x20C */
+    uint32_t e = nand_ecc_calc(page) | (page[ECC_OFFSET] & 0x3Fu);
     page[ECC_OFFSET + 0] = (uint8_t)(e);
     page[ECC_OFFSET + 1] = (uint8_t)(e >> 8);
     page[ECC_OFFSET + 2] = (uint8_t)(e >> 16);

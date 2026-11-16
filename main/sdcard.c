@@ -23,6 +23,7 @@
 static const char *TAG = "sd";
 static sdmmc_card_t *s_card = NULL;
 static bool s_mounted = false;
+static esp_err_t s_last_err = ESP_OK;
 
 bool sd_mount(void)
 {
@@ -39,6 +40,7 @@ bool sd_mount(void)
     /* The V474-style breakout is SPI-only, so drive the card over SDSPI. */
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SD_SPI_HOST;
+    host.max_freq_khz = 8000;   /* jumper-wire friendly; plenty for 16 MB files */
 
     /* Shared bus is brought up once by board_spi_init(). */
     if (board_spi_init() != ESP_OK) {
@@ -54,10 +56,12 @@ bool sd_mount(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "mount failed: %s", esp_err_to_name(err));
         s_card = NULL;
+        s_last_err = err;
         return false;
     }
 
     s_mounted = true;
+    s_last_err = ESP_OK;
     ESP_LOGI(TAG, "card mounted (%llu MB)",
              ((uint64_t)s_card->csd.capacity * s_card->csd.sector_size) >> 20);
     return true;
@@ -74,6 +78,11 @@ void sd_unmount(void)
 }
 
 bool sd_is_mounted(void) { return s_mounted; }
+
+/* ESP_FAIL = a card answered but its filesystem could not be mounted (not
+ * FAT32, e.g. exFAT); anything else = no card answered (absent / wiring). */
+bool sd_card_seen_but_unreadable(void) { return !s_mounted && s_last_err == ESP_FAIL; }
+int sd_last_error(void) { return (int)s_last_err; }
 
 uint64_t sd_total_bytes(void)
 {
