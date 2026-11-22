@@ -62,7 +62,7 @@
 
 #define N_BTNS 6
 
-#define FW_TAG "fw 1116u"   /* shown bottom right: which build is on the chip */
+#define FW_TAG "fw 1121w"   /* shown bottom right: which build is on the chip */
 
 typedef enum { BS_NORMAL, BS_SELECTED, BS_PRESSED, BS_DISABLED } btn_state_t;
 

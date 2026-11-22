@@ -218,7 +218,7 @@ static void job_dump(void)
     }
 
     /* Gate: never create a dump file unless a real console answered. */
-    if (!S.linked || !xbox_smc_stopped) {
+    if (!S.linked || (!s_use_pico && !xbox_smc_stopped)) {
         st(0, "Detect first", true, false);
         return;
     }
@@ -457,7 +457,7 @@ static void job_xell(void)
         SD_MOUNT_POINT "/xell/xell-gggggg.bin",
     };
 
-    if (!S.linked || !xbox_smc_stopped) { st(0, "Detect first", true, false); return; }
+    if (!S.linked || (!s_use_pico && !xbox_smc_stopped)) { st(0, "Detect first", true, false); return; }
     if (!S.have_dump) { st(0, "Dump first", true, false); return; }
 
     st(1, "Checking backup", false, false);
@@ -577,7 +577,7 @@ static void job_flash(void)
         return;
     }
 
-    if (!S.linked || !xbox_smc_stopped) {
+    if (!S.linked || (!s_use_pico && !xbox_smc_stopped)) {
         st(0, "Detect first", true, false);
         return;
     }
@@ -646,12 +646,25 @@ static void job_flash(void)
         /* Release the SMC so the console cold-boots into the freshly-flashed
          * RGH3 image (DBG_EN was held high since detect, halting the console).
          * After this, re-detect is needed before any further NAND op. */
-        st(99, "Restarting console", false, false);
-        xbox_start_smc();
-        xSemaphoreTake(S.lock, portMAX_DELAY);
-        S.linked = false;
-        xSemaphoreGive(S.lock);
-        st(100, "Flash verified", true, true);
+        if (s_use_pico) {
+            /* The PicoFlasher halts the SMC while USB is connected and releases
+             * it on unmount, so the console boots the new image when it is
+             * unplugged or power-cycled. The ESP's own SMC pins aren't wired. */
+            xSemaphoreTake(S.lock, portMAX_DELAY);
+            S.linked = false;
+            xSemaphoreGive(S.lock);
+            st(100, "Flashed - power-cycle console", true, true);
+        } else {
+            /* Release the SMC so the console cold-boots into the freshly-flashed
+             * RGH3 image (DBG_EN was held high since detect, halting the console).
+             * After this, re-detect is needed before any further NAND op. */
+            st(99, "Restarting console", false, false);
+            xbox_start_smc();
+            xSemaphoreTake(S.lock, portMAX_DELAY);
+            S.linked = false;
+            xSemaphoreGive(S.lock);
+            st(100, "Flash verified", true, true);
+        }
     } else {
         st(0, "Verify failed", true, false);
     }
